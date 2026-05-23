@@ -13,7 +13,7 @@
 - **Enumerates** Iranian domains from Certificate Transparency logs (no limit)
 - **Tests** each domain for DNS resolution, HTTP connectivity, TLS validity
 - **Identifies** censorship type: DNS-blocked, TLS-intercepted, or accessible
-- **Saves** results every 10 domains (prevents data loss)
+- **Saves** results every 10 domains
 - **Analyzes** results with filtering, exporting, and comparison tools
 - **Automates** daily scans via systemd timer on your VPS
 
@@ -21,7 +21,7 @@
 
 ## ⚡ Quick Start (One Command)
 
-On a fresh Hetzner VPS (Ubuntu/Debian), run:
+On a VPS (Ubuntu/Debian), run:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scan-ir-domains/main/install.sh)
@@ -42,18 +42,6 @@ The one-command setup:
 - ✅ Monitoring and logging
 
 **Total time: ~3 minutes**
-
----
-
-## 💰 Cost
-
-| VPS Type | Price | Domains/Day | Best For |
-|----------|-------|-------------|----------|
-| CX11 | €2.49/mo | 500-1K | Testing |
-| **CX21** | **€4.90/mo** | **2K-3K** | **Production** ⭐ |
-| CX31 | €7.98/mo | 5K-8K | High volume |
-
-**Recommended:** Start with CX21 (€4.90/month)
 
 ---
 
@@ -79,10 +67,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scan-ir-domain
 ```
 
 ### Method 2: Step-by-Step (Safest)
-See `HETZNER_DEPLOYMENT.md` for detailed instructions.
+See `DEPLOYMENT.md` for detailed instructions.
 
 ### Method 3: Manual (Most Control)
-See `HETZNER_QUICKREF.md` for individual commands.
+See `QUICKREF.md` for individual commands.
 
 ---
 
@@ -96,8 +84,6 @@ DNS-blocked:               ~6,100 (31%)
 Censorship-intercepted:    ~5,000 (26%)
 
 Storage used:              ~10.5 MB
-Monthly cost:              €4.90 (VPS only)
-Cost per million domains:  €0.49
 ```
 
 ---
@@ -119,7 +105,7 @@ Cost per million domains:  €0.49
 
 ### Setup & Automation
 - **`install.sh`** — One-command automatic setup
-- **`deploy_hetzner.sh`** — Manual deployment script
+- **`hetzner.sh`** — Manual deployment script
 - **Systemd files** — Service and timer configuration
 
 ### Documentation
@@ -155,16 +141,6 @@ scp -r root@YOUR_SERVER_IP:/home/domainchecker/checker/results/ ./backups/
 # Check status
 ./status.sh
 ```
-
----
-
-## 📈 Performance by VPS Type
-
-| VPS | vCPU | RAM | Config | Speed | Time |
-|-----|------|-----|--------|-------|------|
-| CX11 | 1 | 1GB | `--workers 10 --timeout 15` | 500-1K/day | 30-60 min |
-| **CX21** | **2** | **4GB** | **`--workers 50 --timeout 10`** | **2K-3K/day** | **5-15 min** |
-| CX31 | 2 | 8GB | `--workers 100 --timeout 5` | 5K-8K/day | 2-5 min |
 
 ---
 
@@ -251,10 +227,10 @@ sudo systemctl restart domain-checker.timer
 ### Download results locally
 ```bash
 # Daily
-scp -r root@YOUR_SERVER_IP:/home/domainchecker/checker/results/ ./backups/$(date +%Y%m%d)/
+scp -r root@VPS_IP:/home/domainchecker/checker/results/ ./backups/$(date +%Y%m%d)/
 
 # Or as cron job
-0 3 * * * scp -r root@YOUR_SERVER_IP:/home/domainchecker/checker/results/ ~/backups/$(date +\%Y\%m\%d)
+0 3 * * * scp -r root@VPS_IP:/home/domainchecker/checker/results/ ~/backups/$(date +\%Y\%m\%d)
 ```
 
 ### Compare scans
@@ -266,22 +242,6 @@ python3 analyze_results.py day2.jsonl --compare day1.jsonl
 ```bash
 python3 analyze_results.py results/scan_*.jsonl --format csv --output results.csv
 ```
-
----
-
-## 🚀 Upgrading VPS
-
-If you run out of resources:
-
-1. Hetzner Cloud Console → Server
-2. **Resize** → Choose new type (e.g., CX21 → CX31)
-3. Select **upgrade** (no downtime)
-4. Update workers in service file:
-   ```bash
-   sudo nano /etc/systemd/system/domain-checker.service
-   # Change: --workers 50 --timeout 10 → --workers 100 --timeout 5
-   sudo systemctl daemon-reload
-   ```
 
 ---
 
@@ -324,7 +284,6 @@ See [DPI Bypass Landscape](DPI_BYPASS_LANDSCAPE.md) for detailed technique compa
 
 ## 🎯 Quick Checklist
 
-- [ ] Create Hetzner VPS (CX21, €4.90/mo)
 - [ ] Run one-line install command
 - [ ] Check timer: `systemctl list-timers`
 - [ ] Wait for 02:00 UTC (or edit timer)
