@@ -2,9 +2,8 @@
 """
 Iranian Domain Checker - Results Analyzer
 ==========================================
-
 Analyze, filter, and export results from iran_domain_checker.py
-https://github.com/Arianrv/scan-ir-domains/
+
 Usage:
     python3 analyze_results.py [input.jsonl] [--format csv|json|summary]
     
