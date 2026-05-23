@@ -3,7 +3,7 @@
 # Works on any Linux VPS (Ubuntu/Debian)
 # Usage: bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-domains/main/install.sh)
 
-set -e
+set -euo pipefail
 
 # ANSI color codes - only work with echo -e
 RED='\033[0;31m'
@@ -12,6 +12,37 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+REPO_URL="https://github.com/Arianrv/scan-ir-domains.git"
+REQUIRED_FILES=("iran_domain_checker.py" "analyze_results.py" "install.sh")
+TMP_DIR=""
+
+cleanup() {
+    if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
+        rm -rf "$TMP_DIR"
+    fi
+}
+trap cleanup EXIT
+
+fail() {
+    echo -e "${RED}✗ $1${NC}"
+    exit 1
+}
+
+validate_integer() {
+    local value="$1"
+    local name="$2"
+    if ! [[ "$value" =~ ^[0-9]+$ ]] || [ "$value" -lt 1 ]; then
+        fail "$name must be a positive integer"
+    fi
+}
+
+validate_username() {
+    local value="$1"
+    if ! [[ "$value" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+        fail "Invalid Linux username: $value"
+    fi
+}
 
 # Banner
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
@@ -23,9 +54,7 @@ echo ""
 
 # Check if running as root
 if [[ $EUID -ne 0 ]]; then
-    echo -e "${RED}✗ This script must be run as root${NC}"
-    echo -e "${YELLOW}Try: sudo bash install.sh${NC}"
-    exit 1
+    fail "This script must be run as root. Try: sudo bash install.sh"
 fi
 
 # Ask about installation mode
@@ -40,13 +69,13 @@ read -p "Choose option (1 or 2): " INSTALL_MODE
 if [ "$INSTALL_MODE" = "1" ]; then
     read -p "Enter username for new user (default: domainchecker): " CHECKER_USER
     CHECKER_USER=${CHECKER_USER:-domainchecker}
+    validate_username "$CHECKER_USER"
     INSTALL_AS_ROOT=false
 elif [ "$INSTALL_MODE" = "2" ]; then
     CHECKER_USER="root"
     INSTALL_AS_ROOT=true
 else
-    echo -e "${RED}Invalid option${NC}"
-    exit 1
+    fail "Invalid option"
 fi
 
 CHECKER_HOME="/home/$CHECKER_USER"
@@ -67,6 +96,7 @@ echo "  100+:   Aggressive (faster, more load)"
 echo ""
 read -p "Enter number of workers (default: 50): " WORKERS_INPUT
 WORKERS=${WORKERS_INPUT:-50}
+validate_integer "$WORKERS" "Workers"
 
 echo ""
 echo "Timeout per domain (in seconds):"
@@ -76,6 +106,7 @@ echo "  15-30:  Patient (slow servers, fewer timeouts)"
 echo ""
 read -p "Enter timeout in seconds (default: 10): " TIMEOUT_INPUT
 TIMEOUT=${TIMEOUT_INPUT:-10}
+validate_integer "$TIMEOUT" "Timeout"
 
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -135,7 +166,7 @@ echo ""
 echo -e "${BLUE}[1/9]${NC} ${YELLOW}Updating system packages${NC} (this may take a minute)..."
 apt update > /dev/null 2>&1 && echo "  └─ Running apt update"
 apt upgrade -y > /dev/null 2>&1 && echo "  └─ Upgrading packages"
-apt install -y python3 python3-pip python3-venv git curl > /dev/null 2>&1 && echo "  └─ Installing dependencies"
+apt install -y python3 python3-pip python3-venv git curl ca-certificates > /dev/null 2>&1 && echo "  └─ Installing dependencies"
 echo -e "${GREEN}✓ System updated${NC}"
 echo ""
 
@@ -153,27 +184,41 @@ fi
 echo -e "${GREEN}✓ User setup complete${NC}"
 echo ""
 
-# Step 3: Create directories
-echo -e "${BLUE}[3/9]${NC} ${YELLOW}Creating directory structure${NC}..."
-mkdir -p "$CHECKER_DIR"/{data,logs,results}
+# Step 3: Prepare install directory
+echo -e "${BLUE}[3/9]${NC} ${YELLOW}Preparing installation directory${NC}..."
+mkdir -p "$CHECKER_DIR"
 chown -R "$CHECKER_USER:$CHECKER_USER" "$CHECKER_HOME"
-chmod -R 755 "$CHECKER_HOME"
-echo "  └─ Created: $CHECKER_DIR"
+chmod 755 "$CHECKER_HOME"
+chmod 755 "$CHECKER_DIR"
+echo "  └─ Prepared: $CHECKER_DIR"
+echo -e "${GREEN}✓ Directory ready${NC}"
+echo ""
+
+# Step 4: Clone repository into a temporary directory, then copy into install dir.
+# This avoids the old failure mode where git clone was attempted inside a non-empty checker directory.
+echo -e "${BLUE}[4/9]${NC} ${YELLOW}Cloning repository from GitHub${NC} (downloading files)..."
+TMP_DIR=$(mktemp -d)
+REPO_DIR="$TMP_DIR/repo"
+if ! sudo -u "$CHECKER_USER" git clone --depth 1 "$REPO_URL" "$REPO_DIR" > /dev/null 2>&1; then
+    fail "Repository clone failed from $REPO_URL"
+fi
+
+cp -a "$REPO_DIR"/. "$CHECKER_DIR"/
+mkdir -p "$CHECKER_DIR"/{data,logs,results}
+chown -R "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR"
+chmod -R u+rwX,go+rX "$CHECKER_DIR"
+
+for required_file in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "$CHECKER_DIR/$required_file" ]; then
+        fail "Missing required file after clone: $required_file"
+    fi
+    echo "  └─ Downloaded: $required_file"
+done
+
 echo "  └─ Created: $CHECKER_DIR/data"
 echo "  └─ Created: $CHECKER_DIR/logs"
 echo "  └─ Created: $CHECKER_DIR/results"
-echo -e "${GREEN}✓ Directories created${NC}"
-echo ""
-
-# Step 4: Clone repository
-echo -e "${BLUE}[4/9]${NC} ${YELLOW}Cloning repository from GitHub${NC} (downloading files)..."
-cd "$CHECKER_DIR"
-if [ ! -d ".git" ]; then
-    sudo -u "$CHECKER_USER" git clone https://github.com/Arianrv/scan-ir-domains.git . > /dev/null 2>&1 && echo "  └─ Downloaded: iran_domain_checker.py"
-    echo "  └─ Downloaded: analyze_results.py"
-    echo "  └─ Downloaded: install.sh"
-fi
-echo -e "${GREEN}✓ Repository cloned${NC}"
+echo -e "${GREEN}✓ Repository cloned and verified${NC}"
 echo ""
 
 # Step 5: Setup Python venv
@@ -187,13 +232,16 @@ echo -e "${GREEN}✓ Python environment ready${NC}"
 echo ""
 
 # Step 6: Test installation
-echo -e "${BLUE}[6/9]${NC} ${YELLOW}Testing installation${NC} (verifying all packages)..."
-TEST=$($CHECKER_DIR/venv/bin/python3 -c "import aiohttp; print('ok')" 2>/dev/null)
+echo -e "${BLUE}[6/9]${NC} ${YELLOW}Testing installation${NC} (verifying files and packages)..."
+for required_file in "${REQUIRED_FILES[@]}"; do
+    [ -f "$CHECKER_DIR/$required_file" ] || fail "Required file missing: $required_file"
+done
+TEST=$($CHECKER_DIR/venv/bin/python3 -c "import aiohttp, aiofiles, certifi, requests; print('ok')" 2>/dev/null)
 if [ "$TEST" != "ok" ]; then
-    echo -e "${RED}✗ Installation test failed${NC}"
-    exit 1
+    fail "Installation test failed"
 fi
-echo "  └─ All packages verified"
+echo "  └─ Required files verified"
+echo "  └─ Python packages verified"
 echo -e "${GREEN}✓ Installation test passed${NC}"
 echo ""
 
@@ -210,11 +258,7 @@ Type=oneshot
 User=$CHECKER_USER
 WorkingDirectory=$CHECKER_DIR
 Environment="PATH=$CHECKER_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-ExecStart=$CHECKER_DIR/venv/bin/python3 iran_domain_checker.py \\
-    --output results/scan_\$(date +\\%Y\\%m\\%d_\\%H\\%M\\%S).jsonl \\
-    --workers $WORKERS \\
-    --timeout $TIMEOUT \\
-    --batch 10
+ExecStart=/bin/bash -lc 'cd "$CHECKER_DIR" && "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" --output "$CHECKER_DIR/results/scan_\$(date +%%Y%%m%%d_%%H%%M%%S).jsonl" --workers $WORKERS --timeout $TIMEOUT --batch 10'
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=domain-checker
@@ -229,18 +273,21 @@ Description=Run scan-ir-domains daily at $SCAN_TIME UTC
 Requires=domain-checker.service
 
 [Timer]
-OnCalendar=daily
 OnCalendar=*-*-* $SCAN_TIME:00
 Persistent=true
 AccuracySec=1s
+Unit=domain-checker.service
 
 [Install]
 WantedBy=timers.target
 TMREOF
 
+if command -v systemd-analyze > /dev/null 2>&1; then
+    systemd-analyze verify /etc/systemd/system/domain-checker.service /etc/systemd/system/domain-checker.timer
+fi
 systemctl daemon-reload
 systemctl enable domain-checker.timer > /dev/null 2>&1
-systemctl start domain-checker.timer > /dev/null 2>&1
+systemctl restart domain-checker.timer > /dev/null 2>&1
 echo "  └─ Created systemd service"
 echo "  └─ Created daily timer (runs at ${SCAN_TIME} UTC)"
 echo "  └─ Timer enabled and started"
@@ -251,24 +298,28 @@ echo ""
 echo -e "${BLUE}[8/9]${NC} ${YELLOW}Creating helper scripts${NC}..."
 cat > "$CHECKER_DIR/status.sh" <<'SCRIPTEOF'
 #!/bin/bash
+set -euo pipefail
+
 echo "=== scan-ir-domains Status ==="
 echo "Time: $(date)"
 echo ""
-LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1)
+
+LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1 || true)
 if [ -n "$LATEST" ]; then
-    echo "Latest scan: $(basename $LATEST)"
-    echo "Size: $(du -h $LATEST | cut -f1)"
-    echo "Lines (domains): $(wc -l < $LATEST)"
-    echo "Age: $(date -r $LATEST '+%Y-%m-%d %H:%M:%S')"
+    echo "Latest scan: $(basename "$LATEST")"
+    echo "Size: $(du -h "$LATEST" | cut -f1)"
+    echo "Lines (domains): $(wc -l < "$LATEST")"
+    echo "Age: $(date -r "$LATEST" '+%Y-%m-%d %H:%M:%S')"
 else
     echo "Status: No scans yet"
 fi
+
 echo ""
 echo "Disk usage:"
 du -sh results/ logs/ data/ 2>/dev/null || echo "  N/A"
 echo ""
 echo "Next scheduled scan:"
-systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker | awk '{print "  " $1 " (" $2 " left)"}' || echo "  Timer info unavailable"
+systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker || echo "  Timer info unavailable"
 SCRIPTEOF
 chmod +x "$CHECKER_DIR/status.sh"
 chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh"
@@ -279,13 +330,13 @@ echo ""
 # Step 9: Firewall
 echo -e "${BLUE}[9/9]${NC} ${YELLOW}Configuring firewall${NC} (UFW - if available)..."
 if command -v ufw &> /dev/null; then
-    ufw --force enable > /dev/null 2>&1
     ufw default deny incoming > /dev/null 2>&1
     ufw default allow outgoing > /dev/null 2>&1
     ufw allow ssh > /dev/null 2>&1
     ufw allow out to any port 53 > /dev/null 2>&1
     ufw allow out to any port 80 > /dev/null 2>&1
     ufw allow out to any port 443 > /dev/null 2>&1
+    ufw --force enable > /dev/null 2>&1
     echo "  └─ UFW firewall configured"
 else
     echo "  └─ UFW not available (skipped)"
@@ -308,14 +359,14 @@ if [ "$RUN_FIRST_SCAN" = "y" ]; then
     echo "Scanning Iranian domains from Certificate Transparency logs..."
     echo "This may take a few minutes depending on network speed..."
     echo ""
-    
+
     cd "$CHECKER_DIR"
-    sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" iran_domain_checker.py \
-        --output results/scan_$(date +%Y%m%d_%H%M%S).jsonl \
+    sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \
+        --output "$CHECKER_DIR/results/scan_$(date +%Y%m%d_%H%M%S).jsonl" \
         --workers "$WORKERS" \
         --timeout "$TIMEOUT" \
         --batch 10
-    
+
     echo ""
     echo -e "${GREEN}✓ First scan complete!${NC}"
     echo ""
