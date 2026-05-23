@@ -1,6 +1,6 @@
 # scan-ir-domains
 
-**Automated Iranian domain accessibility checker** — identifies which .ir domains are accessible from outside Iran using Certificate Transparency logs. Runs on a Hetzner VPS with daily automated scans.
+**Automated Iranian domain accessibility checker** — identifies which .ir domains are accessible from outside Iran using Certificate Transparency logs. Runs on any VPS outside of Iran with daily automated scans.
 
 ![Status](https://img.shields.io/badge/status-production--ready-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
