@@ -53,12 +53,32 @@ if [ "$INSTALL_AS_ROOT" = true ]; then
     CHECKER_HOME="/root"
 fi
 CHECKER_DIR="$CHECKER_HOME/checker"
-WORKERS="${WORKERS:-50}"
-TIMEOUT="${TIMEOUT:-10}"
 
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Configuration${NC}"
+echo -e "${YELLOW}Performance Configuration${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Workers (parallel connections):"
+echo "  1-20:   Conservative (slower, safer)"
+echo "  50:     Balanced (default, recommended)"
+echo "  100+:   Aggressive (faster, more load)"
+echo ""
+read -p "Enter number of workers (default: 50): " WORKERS_INPUT
+WORKERS=${WORKERS_INPUT:-50}
+
+echo ""
+echo "Timeout per domain (in seconds):"
+echo "  5-10:   Fast (quick failure detection)"
+echo "  10-15:  Balanced (default, recommended)"
+echo "  15-30:  Patient (slow servers, fewer timeouts)"
+echo ""
+read -p "Enter timeout in seconds (default: 10): " TIMEOUT_INPUT
+TIMEOUT=${TIMEOUT_INPUT:-10}
+
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}Installation Summary${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo "  User: $CHECKER_USER"
 echo "  Home: $CHECKER_DIR"
