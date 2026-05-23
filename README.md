@@ -13,7 +13,7 @@ Automated Iranian domain accessibility checker. Identifies which .ir domains are
 On any Linux VPS (Ubuntu/Debian), run:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scan-ir-domains/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-domains/main/install.sh)
 ```
 
 That's it! Daily automated scans starting tomorrow at 02:00 UTC.
