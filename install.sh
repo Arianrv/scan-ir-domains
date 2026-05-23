@@ -5,7 +5,6 @@
 
 set -euo pipefail
 
-# ANSI color codes - only work with echo -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -44,23 +43,28 @@ validate_username() {
     fi
 }
 
-# Banner
-echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║   scan-ir-domains - Automatic Setup    ║${NC}"
-echo -e "${BLUE}║                 by                     ║${NC}"
-echo -e "${BLUE}║  github.com/Arianrv/scan-ir-domains/   ║${NC}"
-echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
-echo ""
+print_banner() {
+    echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║   scan-ir-domains - Automatic Setup    ║${NC}"
+    echo -e "${BLUE}║                 by                     ║${NC}"
+    echo -e "${BLUE}║  github.com/Arianrv/scan-ir-domains/   ║${NC}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
+    echo ""
+}
 
-# Check if running as root
+print_section() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}$1${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+print_banner
+
 if [[ $EUID -ne 0 ]]; then
     fail "This script must be run as root. Try: sudo bash install.sh"
 fi
 
-# Ask about installation mode
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Installation Mode${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Installation Mode"
 echo "1) Create new dedicated user (recommended)"
 echo "2) Install for current root user"
 echo ""
@@ -85,9 +89,7 @@ fi
 CHECKER_DIR="$CHECKER_HOME/checker"
 
 echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Performance Configuration${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Performance Configuration"
 echo ""
 echo "Workers (parallel connections):"
 echo "  1-20:   Conservative (slower, safer)"
@@ -109,9 +111,7 @@ TIMEOUT=${TIMEOUT_INPUT:-10}
 validate_integer "$TIMEOUT" "Timeout"
 
 echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Scan Schedule Configuration${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Scan Schedule Configuration"
 echo ""
 echo "Daily scan time (24-hour format, UTC):"
 echo "  02:00 = 2 AM (default, recommended)"
@@ -122,16 +122,13 @@ echo ""
 read -p "Enter scan time (HH:MM format, default: 02:00): " SCAN_TIME_INPUT
 SCAN_TIME=${SCAN_TIME_INPUT:-02:00}
 
-# Validate time format
 if ! [[ $SCAN_TIME =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
     echo -e "${RED}Invalid time format. Using default: 02:00${NC}"
     SCAN_TIME="02:00"
 fi
 
 echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}First Scan${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "First Scan"
 echo ""
 echo "Run first scan immediately after installation?"
 echo "  This will test the scanner and generate initial results"
@@ -140,9 +137,7 @@ read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
 
 echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Installation Summary${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Installation Summary"
 echo "  User: $CHECKER_USER"
 echo "  Home: $CHECKER_DIR"
 echo "  Workers: $WORKERS"
@@ -157,20 +152,16 @@ if [ "$CONTINUE" != "y" ]; then
 fi
 
 echo ""
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Starting Installation...${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Starting Installation..."
 echo ""
 
-# Step 1: Update system
 echo -e "${BLUE}[1/9]${NC} ${YELLOW}Updating system packages${NC} (this may take a minute)..."
 apt update > /dev/null 2>&1 && echo "  └─ Running apt update"
 apt upgrade -y > /dev/null 2>&1 && echo "  └─ Upgrading packages"
-apt install -y python3 python3-pip python3-venv git curl ca-certificates > /dev/null 2>&1 && echo "  └─ Installing dependencies"
+apt install -y python3 python3-pip python3-venv git curl ca-certificates sudo > /dev/null 2>&1 && echo "  └─ Installing dependencies"
 echo -e "${GREEN}✓ System updated${NC}"
 echo ""
 
-# Step 2: Create user
 echo -e "${BLUE}[2/9]${NC} ${YELLOW}Setting up user account${NC}..."
 if [ "$INSTALL_AS_ROOT" = false ]; then
     if id "$CHECKER_USER" &>/dev/null; then
@@ -184,7 +175,6 @@ fi
 echo -e "${GREEN}✓ User setup complete${NC}"
 echo ""
 
-# Step 3: Prepare install directory
 echo -e "${BLUE}[3/9]${NC} ${YELLOW}Preparing installation directory${NC}..."
 mkdir -p "$CHECKER_DIR"
 chown -R "$CHECKER_USER:$CHECKER_USER" "$CHECKER_HOME"
@@ -194,12 +184,16 @@ echo "  └─ Prepared: $CHECKER_DIR"
 echo -e "${GREEN}✓ Directory ready${NC}"
 echo ""
 
-# Step 4: Clone repository into a temporary directory, then copy into install dir.
-# This avoids the old failure mode where git clone was attempted inside a non-empty checker directory.
 echo -e "${BLUE}[4/9]${NC} ${YELLOW}Cloning repository from GitHub${NC} (downloading files)..."
 TMP_DIR=$(mktemp -d)
 REPO_DIR="$TMP_DIR/repo"
-if ! sudo -u "$CHECKER_USER" git clone --depth 1 "$REPO_URL" "$REPO_DIR" > /dev/null 2>&1; then
+CLONE_LOG="$TMP_DIR/git-clone.log"
+
+# Clone as root because mktemp creates a root-owned private directory.
+# Files are copied into CHECKER_DIR and then ownership is assigned to CHECKER_USER.
+if ! git clone --depth 1 "$REPO_URL" "$REPO_DIR" > "$CLONE_LOG" 2>&1; then
+    echo -e "${RED}Git clone output:${NC}"
+    sed 's/^/  │ /' "$CLONE_LOG" || true
     fail "Repository clone failed from $REPO_URL"
 fi
 
@@ -221,7 +215,6 @@ echo "  └─ Created: $CHECKER_DIR/results"
 echo -e "${GREEN}✓ Repository cloned and verified${NC}"
 echo ""
 
-# Step 5: Setup Python venv
 echo -e "${BLUE}[5/9]${NC} ${YELLOW}Setting up Python virtual environment${NC} (this may take 30 seconds)..."
 echo "  └─ Creating venv..."
 sudo -u "$CHECKER_USER" python3 -m venv "$CHECKER_DIR/venv" > /dev/null 2>&1
@@ -231,7 +224,6 @@ sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/pip" install aiohttp aiofiles cer
 echo -e "${GREEN}✓ Python environment ready${NC}"
 echo ""
 
-# Step 6: Test installation
 echo -e "${BLUE}[6/9]${NC} ${YELLOW}Testing installation${NC} (verifying files and packages)..."
 for required_file in "${REQUIRED_FILES[@]}"; do
     [ -f "$CHECKER_DIR/$required_file" ] || fail "Required file missing: $required_file"
@@ -245,7 +237,6 @@ echo "  └─ Python packages verified"
 echo -e "${GREEN}✓ Installation test passed${NC}"
 echo ""
 
-# Step 7: Create systemd service
 echo -e "${BLUE}[7/9]${NC} ${YELLOW}Creating systemd service and timer${NC} (daily scheduler)..."
 cat > "/etc/systemd/system/domain-checker.service" <<SVCEOF
 [Unit]
@@ -294,7 +285,6 @@ echo "  └─ Timer enabled and started"
 echo -e "${GREEN}✓ Systemd service created${NC}"
 echo ""
 
-# Step 8: Create helper scripts
 echo -e "${BLUE}[8/9]${NC} ${YELLOW}Creating helper scripts${NC}..."
 cat > "$CHECKER_DIR/status.sh" <<'SCRIPTEOF'
 #!/bin/bash
@@ -327,7 +317,6 @@ echo "  └─ Created: status.sh"
 echo -e "${GREEN}✓ Helper scripts created${NC}"
 echo ""
 
-# Step 9: Firewall
 echo -e "${BLUE}[9/9]${NC} ${YELLOW}Configuring firewall${NC} (UFW - if available)..."
 if command -v ufw &> /dev/null; then
     ufw default deny incoming > /dev/null 2>&1
@@ -344,17 +333,13 @@ fi
 echo -e "${GREEN}✓ Firewall configured${NC}"
 echo ""
 
-# Installation complete
 echo -e "${BLUE}╔════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║   ✓ Installation Complete!             ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-# Run first scan if requested
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}Running First Scan...${NC}"
-    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    print_section "Running First Scan..."
     echo ""
     echo "Scanning Iranian domains from Certificate Transparency logs..."
     echo "This may take a few minutes depending on network speed..."
@@ -372,10 +357,7 @@ if [ "$RUN_FIRST_SCAN" = "y" ]; then
     echo ""
 fi
 
-# Post-installation instructions
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Next Steps - How to Use${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Next Steps - How to Use"
 echo ""
 echo -e "${GREEN}1. Check Status${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
@@ -400,9 +382,7 @@ echo -e "${GREEN}6. Download Results to Local Machine${NC}"
 echo "   scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/"
 echo ""
 
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Timer Configuration${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Timer Configuration"
 echo ""
 echo -e "${YELLOW}✓ Daily scans are scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
 echo "  Check next run: sudo systemctl list-timers domain-checker.timer"
@@ -414,38 +394,11 @@ echo "  Example for 14:00 UTC: OnCalendar=*-*-* 14:00:00"
 echo "  Then: sudo systemctl daemon-reload && sudo systemctl restart domain-checker.timer"
 echo ""
 
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}Uninstallation${NC}"
-echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+print_section "Uninstallation"
 echo ""
 echo -e "${GREEN}Easy way (Automatic):${NC}"
 echo "   bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-domains/main/uninstall.sh)"
 echo ""
-echo -e "${YELLOW}Manual way (Step by step):${NC}"
-echo ""
-echo "1. Stop the timer and service:"
-echo "   sudo systemctl stop domain-checker.timer"
-echo "   sudo systemctl disable domain-checker.timer"
-echo "   sudo systemctl disable domain-checker.service"
-echo ""
-echo "2. Remove systemd files:"
-echo "   sudo rm /etc/systemd/system/domain-checker.service"
-echo "   sudo rm /etc/systemd/system/domain-checker.timer"
-echo "   sudo systemctl daemon-reload"
-echo ""
-echo "3. Remove installation directory:"
-if [ "$INSTALL_AS_ROOT" = false ]; then
-    echo "   sudo rm -rf $CHECKER_DIR"
-    echo "   sudo userdel -r $CHECKER_USER"
-else
-    echo "   rm -rf $CHECKER_DIR"
-fi
-echo ""
-echo "4. Verify removal:"
-echo "   sudo systemctl list-timers"
-echo "   (domain-checker should not appear)"
-echo ""
-
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo -e "${GREEN}✓ All done! Automated scanning is now running.${NC}"
