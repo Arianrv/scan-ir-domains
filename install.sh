@@ -5,6 +5,7 @@
 
 set -e
 
+# ANSI color codes - only work with echo -e
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -78,12 +79,45 @@ TIMEOUT=${TIMEOUT_INPUT:-10}
 
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}Scan Schedule Configuration${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Daily scan time (24-hour format, UTC):"
+echo "  02:00 = 2 AM (default, recommended)"
+echo "  14:00 = 2 PM"
+echo "  00:00 = Midnight"
+echo "  12:00 = Noon"
+echo ""
+read -p "Enter scan time (HH:MM format, default: 02:00): " SCAN_TIME_INPUT
+SCAN_TIME=${SCAN_TIME_INPUT:-02:00}
+
+# Validate time format
+if ! [[ $SCAN_TIME =~ ^([0-1][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+    echo -e "${RED}Invalid time format. Using default: 02:00${NC}"
+    SCAN_TIME="02:00"
+fi
+
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${YELLOW}First Scan${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "Run first scan immediately after installation?"
+echo "  This will test the scanner and generate initial results"
+echo ""
+read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
+RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
+
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${YELLOW}Installation Summary${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo "  User: $CHECKER_USER"
 echo "  Home: $CHECKER_DIR"
 echo "  Workers: $WORKERS"
 echo "  Timeout: ${TIMEOUT}s"
+echo "  Daily scan time: ${SCAN_TIME} UTC"
+echo "  Run first scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
 echo ""
 read -p "Continue with installation? (y/n): " CONTINUE
 if [ "$CONTINUE" != "y" ]; then
@@ -191,12 +225,12 @@ SVCEOF
 
 cat > "/etc/systemd/system/domain-checker.timer" <<TMREOF
 [Unit]
-Description=Run scan-ir-domains daily at 02:00 UTC
+Description=Run scan-ir-domains daily at $SCAN_TIME UTC
 Requires=domain-checker.service
 
 [Timer]
 OnCalendar=daily
-OnCalendar=*-*-* 02:00:00
+OnCalendar=*-*-* $SCAN_TIME:00
 Persistent=true
 AccuracySec=1s
 
@@ -208,7 +242,7 @@ systemctl daemon-reload
 systemctl enable domain-checker.timer > /dev/null 2>&1
 systemctl start domain-checker.timer > /dev/null 2>&1
 echo "  └─ Created systemd service"
-echo "  └─ Created daily timer (runs at 02:00 UTC)"
+echo "  └─ Created daily timer (runs at ${SCAN_TIME} UTC)"
 echo "  └─ Timer enabled and started"
 echo -e "${GREEN}✓ Systemd service created${NC}"
 echo ""
@@ -227,7 +261,7 @@ if [ -n "$LATEST" ]; then
     echo "Lines (domains): $(wc -l < $LATEST)"
     echo "Age: $(date -r $LATEST '+%Y-%m-%d %H:%M:%S')"
 else
-    echo "Status: No scans yet (will run at 02:00 UTC)"
+    echo "Status: No scans yet"
 fi
 echo ""
 echo "Disk usage:"
@@ -265,74 +299,99 @@ echo -e "${GREEN}║   ✓ Installation Complete!             ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════╝${NC}"
 echo ""
 
+# Run first scan if requested
+if [ "$RUN_FIRST_SCAN" = "y" ]; then
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}Running First Scan...${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo "Scanning Iranian domains from Certificate Transparency logs..."
+    echo "This may take a few minutes depending on network speed..."
+    echo ""
+    
+    cd "$CHECKER_DIR"
+    sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" iran_domain_checker.py \
+        --output results/scan_$(date +%Y%m%d_%H%M%S).jsonl \
+        --workers "$WORKERS" \
+        --timeout "$TIMEOUT" \
+        --batch 10
+    
+    echo ""
+    echo -e "${GREEN}✓ First scan complete!${NC}"
+    echo ""
+fi
+
 # Post-installation instructions
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${YELLOW}Next Steps - How to Use${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 echo -e "${GREEN}1. Check Status${NC}"
-echo "   ${YELLOW}sudo -u $CHECKER_USER $CHECKER_DIR/status.sh${NC}"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
 echo ""
 echo -e "${GREEN}2. View Live Logs${NC}"
-echo "   ${YELLOW}sudo journalctl -u domain-checker.service -f${NC}"
+echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
 echo -e "${GREEN}3. Manual Test Scan${NC}"
-echo "   ${YELLOW}cd $CHECKER_DIR${NC}"
-echo "   ${YELLOW}source venv/bin/activate${NC}"
-echo "   ${YELLOW}python3 iran_domain_checker.py --domains 'test.ir,example.ir' --timeout 5${NC}"
+echo "   cd $CHECKER_DIR"
+echo "   source venv/bin/activate"
+echo "   python3 iran_domain_checker.py --domains 'test.ir,example.ir' --timeout 5"
 echo ""
 echo -e "${GREEN}4. View Results${NC}"
-echo "   ${YELLOW}ls -lh $CHECKER_DIR/results/${NC}"
+echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
 echo -e "${GREEN}5. Analyze Results${NC}"
-echo "   ${YELLOW}cd $CHECKER_DIR${NC}"
-echo "   ${YELLOW}source venv/bin/activate${NC}"
-echo "   ${YELLOW}python3 analyze_results.py results/scan_*.jsonl --format summary${NC}"
+echo "   cd $CHECKER_DIR"
+echo "   source venv/bin/activate"
+echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
 echo ""
 echo -e "${GREEN}6. Download Results to Local Machine${NC}"
-echo "   ${YELLOW}scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/${NC}"
+echo "   scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/"
 echo ""
 
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${YELLOW}Timer Configuration${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${YELLOW}✓ Daily scans are scheduled to run at${NC} ${GREEN}02:00 UTC${NC}"
-echo "  Check next run: ${YELLOW}sudo systemctl list-timers domain-checker.timer${NC}"
+echo -e "${YELLOW}✓ Daily scans are scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
+echo "  Check next run: sudo systemctl list-timers domain-checker.timer"
 echo ""
 echo -e "${YELLOW}To change scan time:${NC}"
-echo "  ${YELLOW}sudo nano /etc/systemd/system/domain-checker.timer${NC}"
-echo "  Edit the line: ${GREEN}OnCalendar=*-*-* 02:00:00${NC}"
-echo "  Example for 14:00 UTC: ${GREEN}OnCalendar=*-*-* 14:00:00${NC}"
-echo "  Then: ${YELLOW}sudo systemctl daemon-reload && sudo systemctl restart domain-checker.timer${NC}"
+echo "  sudo nano /etc/systemd/system/domain-checker.timer"
+echo "  Edit the line: OnCalendar=*-*-* ${SCAN_TIME}:00"
+echo "  Example for 14:00 UTC: OnCalendar=*-*-* 14:00:00"
+echo "  Then: sudo systemctl daemon-reload && sudo systemctl restart domain-checker.timer"
 echo ""
 
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${YELLOW}Uninstallation${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${YELLOW}To completely remove scan-ir-domains:${NC}"
+echo -e "${GREEN}Easy way (Automatic):${NC}"
+echo "   bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-domains/main/uninstall.sh)"
 echo ""
-echo "1. ${YELLOW}Stop the timer and service:${NC}"
-echo "   ${GREEN}sudo systemctl stop domain-checker.timer${NC}"
-echo "   ${GREEN}sudo systemctl disable domain-checker.timer${NC}"
-echo "   ${GREEN}sudo systemctl disable domain-checker.service${NC}"
+echo -e "${YELLOW}Manual way (Step by step):${NC}"
 echo ""
-echo "2. ${YELLOW}Remove systemd files:${NC}"
-echo "   ${GREEN}sudo rm /etc/systemd/system/domain-checker.service${NC}"
-echo "   ${GREEN}sudo rm /etc/systemd/system/domain-checker.timer${NC}"
-echo "   ${GREEN}sudo systemctl daemon-reload${NC}"
+echo "1. Stop the timer and service:"
+echo "   sudo systemctl stop domain-checker.timer"
+echo "   sudo systemctl disable domain-checker.timer"
+echo "   sudo systemctl disable domain-checker.service"
 echo ""
-echo "3. ${YELLOW}Remove installation directory:${NC}"
+echo "2. Remove systemd files:"
+echo "   sudo rm /etc/systemd/system/domain-checker.service"
+echo "   sudo rm /etc/systemd/system/domain-checker.timer"
+echo "   sudo systemctl daemon-reload"
+echo ""
+echo "3. Remove installation directory:"
 if [ "$INSTALL_AS_ROOT" = false ]; then
-    echo "   ${GREEN}sudo rm -rf $CHECKER_DIR${NC}"
-    echo "   ${GREEN}sudo userdel -r $CHECKER_USER${NC}"
+    echo "   sudo rm -rf $CHECKER_DIR"
+    echo "   sudo userdel -r $CHECKER_USER"
 else
-    echo "   ${GREEN}rm -rf $CHECKER_DIR${NC}"
+    echo "   rm -rf $CHECKER_DIR"
 fi
 echo ""
-echo "4. ${YELLOW}Verify removal:${NC}"
-echo "   ${GREEN}sudo systemctl list-timers${NC}"
+echo "4. Verify removal:"
+echo "   sudo systemctl list-timers"
 echo "   (domain-checker should not appear)"
 echo ""
 
