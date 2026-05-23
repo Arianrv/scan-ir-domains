@@ -130,10 +130,11 @@ fi
 echo ""
 print_section "First Scan"
 echo ""
-echo "Run first scan immediately after installation?"
-echo "  This will test the scanner and generate initial results"
+echo "Run first full scan immediately after installation?"
+echo "  This will query Certificate Transparency logs and scan all discovered .ir domains."
+echo "  If CT logs are temporarily unavailable, installation still succeeds and the scan is skipped."
 echo ""
-read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
+read -p "Run first full scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
 
 echo ""
@@ -143,7 +144,7 @@ echo "  Home: $CHECKER_DIR"
 echo "  Workers: $WORKERS"
 echo "  Timeout: ${TIMEOUT}s"
 echo "  Daily scan time: ${SCAN_TIME} UTC"
-echo "  Run first scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
+echo "  Run first full scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
 echo ""
 read -p "Continue with installation? (y/n): " CONTINUE
 if [ "$CONTINUE" != "y" ]; then
@@ -189,8 +190,6 @@ TMP_DIR=$(mktemp -d)
 REPO_DIR="$TMP_DIR/repo"
 CLONE_LOG="$TMP_DIR/git-clone.log"
 
-# Clone as root because mktemp creates a root-owned private directory.
-# Files are copied into CHECKER_DIR and then ownership is assigned to CHECKER_USER.
 if ! git clone --depth 1 "$REPO_URL" "$REPO_DIR" > "$CLONE_LOG" 2>&1; then
     echo -e "${RED}Git clone output:${NC}"
     sed 's/^/  │ /' "$CLONE_LOG" || true
@@ -265,7 +264,7 @@ Requires=domain-checker.service
 
 [Timer]
 OnCalendar=*-*-* $SCAN_TIME:00
-Persistent=true
+Persistent=false
 AccuracySec=1s
 Unit=domain-checker.service
 
@@ -339,21 +338,29 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    print_section "Running First Scan..."
+    print_section "Running First Full Scan..."
     echo ""
-    echo "Scanning Iranian domains from Certificate Transparency logs..."
-    echo "This may take a few minutes depending on network speed..."
+    echo "Scanning .ir domains from Certificate Transparency logs..."
+    echo "This may take several minutes depending on CT log availability and network speed."
     echo ""
 
     cd "$CHECKER_DIR"
-    sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \
+    if sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \
         --output "$CHECKER_DIR/results/scan_$(date +%Y%m%d_%H%M%S).jsonl" \
         --workers "$WORKERS" \
         --timeout "$TIMEOUT" \
-        --batch 10
-
-    echo ""
-    echo -e "${GREEN}✓ First scan complete!${NC}"
+        --batch 10; then
+        echo ""
+        echo -e "${GREEN}✓ First full scan complete!${NC}"
+    else
+        echo ""
+        echo -e "${YELLOW}⚠ First full scan did not complete.${NC}"
+        echo "  Certificate Transparency discovery may be temporarily unavailable."
+        echo "  No fallback test scan was saved as a real result."
+        echo "  Retry manually:"
+        echo "   cd $CHECKER_DIR"
+        echo "   sudo -u $CHECKER_USER $CHECKER_DIR/venv/bin/python3 iran_domain_checker.py --output $CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl --workers $WORKERS --timeout $TIMEOUT --batch 10"
+    fi
     echo ""
 fi
 
@@ -365,20 +372,24 @@ echo ""
 echo -e "${GREEN}2. View Live Logs${NC}"
 echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
-echo -e "${GREEN}3. Manual Test Scan${NC}"
+echo -e "${GREEN}3. Manual Full Scan${NC}"
+echo "   cd $CHECKER_DIR"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/venv/bin/python3 iran_domain_checker.py --output $CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl --workers $WORKERS --timeout $TIMEOUT --batch 10"
+echo ""
+echo -e "${GREEN}4. Manual Test Scan${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
 echo "   python3 iran_domain_checker.py --domains 'test.ir,example.ir' --timeout 5"
 echo ""
-echo -e "${GREEN}4. View Results${NC}"
+echo -e "${GREEN}5. View Results${NC}"
 echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
-echo -e "${GREEN}5. Analyze Results${NC}"
+echo -e "${GREEN}6. Analyze Results${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
 echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
 echo ""
-echo -e "${GREEN}6. Download Results to Local Machine${NC}"
+echo -e "${GREEN}7. Download Results to Local Machine${NC}"
 echo "   scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/"
 echo ""
 
@@ -401,5 +412,5 @@ echo "   bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-dom
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}✓ All done! Automated scanning is now running.${NC}"
+echo -e "${GREEN}✓ All done! Automated scanning is now configured.${NC}"
 echo ""
