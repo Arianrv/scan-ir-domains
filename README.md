@@ -1,4 +1,4 @@
-# scan-ir-domains
+# Scan-ir-domains
 
 Automated Iranian domain accessibility checker. Identifies which .ir domains are accessible from outside Iran using Certificate Transparency logs. Deploy to any Linux VPS in one command.
 
