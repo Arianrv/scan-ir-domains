@@ -1,6 +1,6 @@
 # scan-ir-domains
 
-**Automated Iranian domain accessibility checker** — identifies which .ir domains are accessible from outside Iran using Certificate Transparency logs. Runs on any VPS outside of Iran with daily automated scans.
+Automated Iranian domain accessibility checker. Identifies which .ir domains are accessible from outside Iran using Certificate Transparency logs. Deploy to any Linux VPS in one command.
 
 ![Status](https://img.shields.io/badge/status-production--ready-green)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -8,40 +8,53 @@
 
 ---
 
-## 🎯 What It Does
+## ⚡ Quick Start
 
-- **Enumerates** Iranian domains from Certificate Transparency logs (no limit)
-- **Tests** each domain for DNS resolution, HTTP connectivity, TLS validity
-- **Identifies** censorship type: DNS-blocked, TLS-intercepted, or accessible
-- **Saves** results every 10 domains
-- **Analyzes** results with filtering, exporting, and comparison tools
-- **Automates** daily scans via systemd timer on your VPS
-
----
-
-## ⚡ Quick Start (One Command)
-
-On a VPS (Ubuntu/Debian), run:
+On any Linux VPS (Ubuntu/Debian), run:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scan-ir-domains/main/install.sh)
 ```
 
-**That's it!** The timer runs daily at 02:00 UTC starting tomorrow.
+That's it! Daily automated scans starting tomorrow at 02:00 UTC.
 
 ---
 
-## 📋 What Gets Installed
+## 🎯 What It Does
 
-The one-command setup:
-- ✅ Python 3.8+ with virtual environment
-- ✅ All dependencies (aiohttp, aiofiles, certifi, etc.)
+- **Enumerates** Iranian domains from Certificate Transparency logs
+- **Tests** each domain (DNS resolution, HTTP status, TLS validity)
+- **Identifies** censorship type (DNS-blocked, TLS-intercepted, accessible)
+- **Saves** results every 10 domains (prevents data loss)
+- **Analyzes** with filtering, exporting, comparing tools
+- **Automates** daily scans via systemd timer
+
+---
+
+## 📊 Expected Results
+
+Scanning ~2800 unique .ir domains per day:
+```
+Accessible:                43%
+DNS-blocked:              31%
+Censorship-intercepted:   26%
+```
+
+Results stored as JSONL (one per domain) - easy to parse and analyze.
+
+---
+
+## 📦 What Gets Installed
+
+The one-command installer:
+- ✅ Python 3.8+ with venv
+- ✅ All dependencies (aiohttp, aiofiles, certifi)
 - ✅ Systemd service + daily timer
-- ✅ Firewall configuration (UFW)
-- ✅ Helper analysis scripts
-- ✅ Monitoring and logging
+- ✅ Firewall configuration
+- ✅ Analysis scripts
+- ✅ Logging and monitoring
 
-**Total time: ~3 minutes**
+**Time:** ~3 minutes
 
 ---
 
@@ -49,115 +62,15 @@ The one-command setup:
 
 | File | Purpose |
 |------|---------|
-| `README.md` (this file) | Quick overview |
-| `install.sh` | Automatic setup script |
-| `HETZNER_QUICKREF.md` | 5-minute setup guide |
-| `HETZNER_DEPLOYMENT.md` | Step-by-step instructions |
-| `HETZNER_OPTIMIZATION.md` | VPS sizing & tuning |
-| `USAGE_GUIDE.md` | Complete feature reference |
-| `INDEX.md` | File navigation guide |
+| `README.md` | This file |
+| `install.sh` | Automatic installer |
+| `QUICKSTART.md` | Local testing guide |
+| `USAGE_GUIDE.md` | Complete reference |
+| `INDEX.md` | File navigation |
 
 ---
 
-## 🚀 Three Ways to Install
-
-### Method 1: One Command (Fastest) ⭐
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/scan-ir-domains/main/install.sh)
-```
-
-### Method 2: Step-by-Step (Safest)
-See `DEPLOYMENT.md` for detailed instructions.
-
-### Method 3: Manual (Most Control)
-See `QUICKREF.md` for individual commands.
-
----
-
-## 📊 Expected Results
-
-After one week (CX21 VPS):
-```
-Total domains checked:     19,600 (2,800/day × 7 days)
-Accessible:                ~8,500 (43%)
-DNS-blocked:               ~6,100 (31%)
-Censorship-intercepted:    ~5,000 (26%)
-
-Storage used:              ~10.5 MB
-```
-
----
-
-## 🔍 What's Inside
-
-### Core Scripts
-- **`iran_domain_checker.py`** — Main scanner (500 lines)
-  - Streams CT logs continuously
-  - 50 parallel workers (configurable)
-  - Saves results every 10 domains
-  - Tests DNS, HTTP/HTTPS, TLS validity
-
-- **`analyze_results.py`** — Results analyzer (400 lines)
-  - Filter by accessibility
-  - Export to CSV/JSON
-  - Compare scans over time
-  - Find specific domains
-
-### Setup & Automation
-- **`install.sh`** — One-command automatic setup
-- **`hetzner.sh`** — Manual deployment script
-- **Systemd files** — Service and timer configuration
-
-### Documentation
-- **8 comprehensive guides** covering all aspects
-- **40+ examples** for all use cases
-- **VPS sizing recommendations**
-- **Performance tuning guide**
-
----
-
-## 🎯 Basic Commands
-
-Once installed on your VPS:
-
-```bash
-# Check timer status
-sudo systemctl list-timers domain-checker.timer
-
-# View latest logs
-sudo journalctl -u domain-checker.service -f
-
-# Run a manual scan
-cd /home/domainchecker/checker
-source venv/bin/activate
-python3 iran_domain_checker.py --domains "test.ir,example.ir"
-
-# Analyze results
-python3 analyze_results.py results/scan_*.jsonl --format summary
-
-# Download to local machine
-scp -r root@YOUR_SERVER_IP:/home/domainchecker/checker/results/ ./backups/
-
-# Check status
-./status.sh
-```
-
----
-
-## 🔐 Security Features
-
-- ✅ Runs as non-root user (domainchecker)
-- ✅ Firewall configured (UFW)
-- ✅ SSH key authentication only
-- ✅ Logs all activity (journalctl)
-- ✅ Rate-limited API queries
-- ✅ SSL verification disabled (intentional) to detect MITM proxies
-
----
-
-## 📊 Understanding Results
-
-Each domain gets tested and returns:
+## 🔍 Understanding Results
 
 ```json
 {
@@ -172,46 +85,46 @@ Each domain gets tested and returns:
 }
 ```
 
-**Interpretation:**
-- **DNS-blocked** (dns_resolves=false): Use DoH/DoT
-- **TLS-intercepted** (dns_resolves=true, accessible=false): Use REALITY/ShadowTLS
+**Result types:**
+- **DNS-blocked** (dns_resolves=false): Use DoH or DoT
+- **TLS-intercepted** (dns_resolves=true, accessible=false): Use REALITY or ShadowTLS
 - **Fully accessible** (accessible=true): No bypass needed
 
 ---
 
-## 🆘 Troubleshooting
+## 🎯 Basic Commands
 
-### Timer not running?
 ```bash
-sudo systemctl status domain-checker.timer
-sudo journalctl -u domain-checker.service -n 20
-```
+# Check timer status
+sudo systemctl list-timers domain-checker.timer
 
-### Out of memory?
-Edit `/etc/systemd/system/domain-checker.service` and change:
-```
---workers 20 --timeout 15
-```
+# View logs
+sudo journalctl -u domain-checker.service -f
 
-### Disk full?
-```bash
-cd /home/domainchecker/checker/results
-tar -czf old_scans.tar.gz scan_*.jsonl
-rm scan_*.jsonl
+# Run manual scan
+cd /home/domainchecker/checker
+source venv/bin/activate
+python3 iran_domain_checker.py --domains "test.ir,example.ir"
+
+# Analyze results
+python3 analyze_results.py results/scan_*.jsonl --format summary
+
+# Download to local machine
+scp -r root@YOUR_SERVER_IP:/home/domainchecker/checker/results/ ./backups/
 ```
 
 ---
 
-## 📝 Configuration
+## 🔧 Customization
 
-Edit `/etc/systemd/system/domain-checker.service` to customize:
+Edit `/etc/systemd/system/domain-checker.service`:
 
 ```bash
 # Change scan time (default: 02:00 UTC)
 sudo nano /etc/systemd/system/domain-checker.timer
-# Edit: OnCalendar=*-*-* 14:00:00
+# Edit: OnCalendar=*-*-* 02:00:00
 
-# Change workers/timeout
+# Change workers/timeout (performance tuning)
 sudo nano /etc/systemd/system/domain-checker.service
 # Edit: --workers 50 --timeout 10
 
@@ -220,76 +133,64 @@ sudo systemctl daemon-reload
 sudo systemctl restart domain-checker.timer
 ```
 
+Options:
+- **Conservative**: `--workers 20 --timeout 15` (slower, safer)
+- **Balanced** (default): `--workers 50 --timeout 10`
+- **Aggressive**: `--workers 100 --timeout 5` (faster, more load)
+
 ---
 
-## 📊 Monitoring Results
+## 📊 Performance Tuning
 
-### Download results locally
+Adjust based on VPS specs:
+
+| VPS Spec | Workers | Timeout | Domains/Day | Time |
+|----------|---------|---------|-------------|------|
+| 1 vCPU, 1GB RAM | 10 | 15s | 500-1K | 30-60m |
+| 2 vCPU, 4GB RAM | 50 | 10s | 2K-3K | 5-15m |
+| 4 vCPU, 8GB RAM | 100 | 5s | 5K-8K | 2-5m |
+
+---
+
+## 🚨 Troubleshooting
+
+### Timer not running
 ```bash
-# Daily
-scp -r root@VPS_IP:/home/domainchecker/checker/results/ ./backups/$(date +%Y%m%d)/
-
-# Or as cron job
-0 3 * * * scp -r root@VPS_IP:/home/domainchecker/checker/results/ ~/backups/$(date +\%Y\%m\%d)
+sudo systemctl status domain-checker.timer
+sudo journalctl -u domain-checker.service -n 20
 ```
 
-### Compare scans
+### Out of memory
+Edit service file and set: `--workers 20 --timeout 15`
+
+### Disk full
 ```bash
-python3 analyze_results.py day2.jsonl --compare day1.jsonl
+cd /home/domainchecker/checker/results
+tar -czf old_scans.tar.gz scan_*.jsonl
+rm scan_*.jsonl
 ```
 
-### Export to CSV
+### Manual test
 ```bash
-python3 analyze_results.py results/scan_*.jsonl --format csv --output results.csv
+cd /home/domainchecker/checker
+source venv/bin/activate
+python3 iran_domain_checker.py --domains "test.ir" --timeout 5
 ```
 
 ---
 
 ## 📄 License
 
-MIT — Use freely, no restrictions.
+MIT - Use freely
 
 ---
 
-## 🎓 DPI Bypass Context
+## 🔗 Related
 
-This tool identifies which censorship technique is needed:
-
-| Result | Block Type | Bypass Method |
-|--------|-----------|---------------|
-| DNS ✗ | DNS-level | DoH, DoT |
-| DNS ✓, TLS ✗ | TLS intercept | REALITY, ShadowTLS, Cloak |
-| All ✓ | No block | Direct access |
-
-See [DPI Bypass Landscape](DPI_BYPASS_LANDSCAPE.md) for detailed technique comparison.
+- [DPI Bypass Landscape](https://github.com/bol-van/zapret) - Censorship evasion techniques
+- [Xray-core](https://github.com/XTLS/Xray-core) - REALITY proxy
+- [Hysteria](https://github.com/apernet/hysteria) - QUIC tunnel
 
 ---
 
-## 🔗 Related Projects
-
-- [zapret](https://github.com/bol-van/zapret) — Packet-level desync
-- [Xray-core](https://github.com/XTLS/Xray-core) — REALITY proxy
-- [Hysteria](https://github.com/apernet/hysteria) — QUIC-based tunnel
-- [Geneva](https://github.com/Kkevsterrr/geneva) — DPI evasion research
-
----
-
-## 📞 Support
-
-- **Hetzner Issues**: https://docs.hetzner.cloud
-- **Python Issues**: https://docs.python.org/3/
-- **Systemd Issues**: `man systemctl`
-
----
-
-## 🎯 Quick Checklist
-
-- [ ] Run one-line install command
-- [ ] Check timer: `systemctl list-timers`
-- [ ] Wait for 02:00 UTC (or edit timer)
-- [ ] Check results: `ls -lh /home/domainchecker/checker/results/`
-- [ ] Download: `scp -r ...`
-
----
-
-**That's it! Automated Iranian domain scanning on your VPS.** 🚀
+**Deploy to any Linux VPS with one command!**
