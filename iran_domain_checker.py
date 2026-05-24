@@ -30,7 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
-DEFAULT_CT_PREFIXES = "0123456789abcdefghijklmnopqrstuvwxyz"
+CT_SHARD_CHARS = "0123456789abcdefghijklmnopqrstuvwxyz"
+DEFAULT_CT_PREFIXES = "auto2"
 TRANSIENT_CT_STATUSES = {429, 500, 502, 503, 504}
 
 logging.basicConfig(
@@ -55,8 +56,10 @@ class CtTransientError(RuntimeError):
 class DomainChecker:
     """
     Checks CT-known .ir hostname accessibility from the current VPS/network.
-    CT discovery is sharded by hostname prefix so crt.sh is not asked for the
-    whole .ir namespace in one fragile query.
+
+    Discovery defaults to two-character prefix shards because one broad query
+    such as %.ir, or even one-character shards such as a%.ir, is too large and
+    often fails on crt.sh with 502/504 or invalid HTML instead of JSON.
     """
 
     def __init__(
@@ -65,36 +68,53 @@ class DomainChecker:
         workers: int = 50,
         timeout: int = 10,
         batch_size: int = 10,
-        ct_timeout: int = 60,
-        ct_retries: int = 2,
+        ct_timeout: int = 45,
+        ct_retries: int = 1,
         ct_prefixes: str = DEFAULT_CT_PREFIXES,
-        ct_max_depth: int = 2,
-        ct_query_delay: float = 1.0,
-        ct_max_response_mb: int = 50,
+        ct_max_depth: int = 3,
+        ct_query_delay: float = 0.2,
+        ct_max_response_mb: int = 25,
+        ct_concurrency: int = 4,
+        ct_fail_fast_shards: int = 20,
     ):
         self.output_file = output_file
         self.workers = workers
         self.timeout = timeout
         self.batch_size = batch_size
         self.ct_timeout = ct_timeout
-        self.ct_retries = ct_retries
+        self.ct_retries = max(1, ct_retries)
+        self.ct_shard_chars = list(CT_SHARD_CHARS)
         self.ct_prefixes = self._normalize_prefixes(ct_prefixes)
-        self.ct_shard_chars = self._normalize_prefixes(DEFAULT_CT_PREFIXES)
         self.ct_max_depth = max(1, ct_max_depth)
         self.ct_query_delay = max(0.0, ct_query_delay)
         self.ct_max_response_bytes = max(1, ct_max_response_mb) * 1024 * 1024
+        self.ct_concurrency = max(1, ct_concurrency)
+        self.ct_fail_fast_shards = max(1, ct_fail_fast_shards)
         self.checked_domains: Set[str] = set()
         self.results_buffer: List[Dict] = []
         self.write_lock = asyncio.Lock()
         self.session: Optional[aiohttp.ClientSession] = None
         self.queue: asyncio.Queue = asyncio.Queue()
 
-    @staticmethod
-    def _normalize_prefixes(raw_prefixes: str) -> List[str]:
-        if "," in raw_prefixes:
-            candidates = [item.strip().lower() for item in raw_prefixes.split(",")]
+    def _auto_prefixes(self, depth: int) -> List[str]:
+        prefixes = [""]
+        for _ in range(depth):
+            prefixes = [f"{prefix}{char}" for prefix in prefixes for char in self.ct_shard_chars]
+        return prefixes
+
+    def _normalize_prefixes(self, raw_prefixes: str) -> List[str]:
+        value = raw_prefixes.strip().lower()
+        if value.startswith("auto"):
+            suffix = value[4:]
+            depth = 2 if not suffix else int(suffix)
+            if depth < 1:
+                raise ValueError("auto CT prefix depth must be at least 1")
+            return self._auto_prefixes(depth)
+
+        if "," in value:
+            candidates = [item.strip().lower() for item in value.split(",")]
         else:
-            candidates = [char.lower() for char in raw_prefixes if not char.isspace()]
+            candidates = [char.lower() for char in value if not char.isspace()]
 
         prefixes: List[str] = []
         seen: Set[str] = set()
@@ -112,8 +132,8 @@ class DomainChecker:
 
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(
-            limit=self.workers,
-            limit_per_host=5,
+            limit=max(self.workers, self.ct_concurrency + 5),
+            limit_per_host=max(5, self.ct_concurrency),
             ttl_dns_cache=300,
         )
         self.session = aiohttp.ClientSession(
@@ -294,7 +314,12 @@ class DomainChecker:
     async def _download_ct_json(self, query: str) -> List[Dict]:
         session = self._require_session()
         url = "https://crt.sh/"
-        params = {"q": query, "output": "json"}
+        params = {
+            "q": query,
+            "output": "json",
+            "exclude": "expired",
+            "deduplicate": "Y",
+        }
         data = bytearray()
 
         async with session.get(
@@ -367,11 +392,11 @@ class DomainChecker:
                 logger.error(f"Unexpected CT log query error for {query}: {exc}")
 
             if attempt < self.ct_retries:
-                delay = min(10 * attempt, 30)
+                delay = min(3 * attempt, 10)
                 logger.info(f"Retrying CT shard {query} in {delay}s")
                 await asyncio.sleep(delay)
 
-        logger.warning(f"CT shard {query} failed after {self.ct_retries} attempts")
+        logger.warning(f"CT shard {query} failed after {self.ct_retries} attempt(s)")
         return None
 
     async def process_ct_logs(self) -> Set[str]:
@@ -381,41 +406,77 @@ class DomainChecker:
         """
         ct_domains: Set[str] = set()
         failed_shards: List[str] = []
-        pending: List[str] = list(self.ct_prefixes)
+        pending: asyncio.Queue[str] = asyncio.Queue()
         processed: Set[str] = set()
+        lock = asyncio.Lock()
+        abort = asyncio.Event()
+        stats = {"failed": 0, "completed": 0}
 
-        while pending:
-            prefix = pending.pop(0)
-            if prefix in processed:
-                continue
-            processed.add(prefix)
+        for prefix in self.ct_prefixes:
+            await pending.put(prefix)
 
-            try:
-                shard_domains = await self._query_ct_shard(prefix)
-            except CtResponseTooLarge:
-                if len(prefix) < self.ct_max_depth:
-                    logger.info(f"Splitting oversized CT shard {prefix!r} into deeper shards")
-                    pending.extend(f"{prefix}{char}" for char in self.ct_shard_chars)
-                else:
-                    logger.warning(
-                        f"Skipping oversized CT shard {prefix!r}; increase --ct-max-depth "
-                        "or --ct-max-response-mb for broader coverage"
-                    )
-                    failed_shards.append(prefix)
-                shard_domains = None
+        async def ct_worker(worker_id: int) -> None:
+            while not abort.is_set():
+                try:
+                    prefix = pending.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
 
-            if shard_domains is None:
-                failed_shards.append(prefix)
-            elif shard_domains:
-                before = len(ct_domains)
-                ct_domains.update(shard_domains)
-                logger.info(
-                    f"CT discovery total: {len(ct_domains)} unique .ir hostnames "
-                    f"(+{len(ct_domains) - before})"
-                )
+                try:
+                    async with lock:
+                        if prefix in processed:
+                            continue
+                        processed.add(prefix)
 
-            if self.ct_query_delay:
-                await asyncio.sleep(self.ct_query_delay)
+                    try:
+                        shard_domains = await self._query_ct_shard(prefix)
+                    except CtResponseTooLarge:
+                        if len(prefix) < self.ct_max_depth:
+                            logger.info(f"Splitting oversized CT shard {prefix!r} into deeper shards")
+                            for char in self.ct_shard_chars:
+                                await pending.put(f"{prefix}{char}")
+                        else:
+                            logger.warning(
+                                f"Skipping oversized CT shard {prefix!r}; increase --ct-max-depth "
+                                "or --ct-max-response-mb for broader coverage"
+                            )
+                            shard_domains = None
+
+                    async with lock:
+                        stats["completed"] += 1
+                        if shard_domains is None:
+                            failed_shards.append(prefix)
+                            stats["failed"] += 1
+                        elif shard_domains:
+                            before = len(ct_domains)
+                            ct_domains.update(shard_domains)
+                            logger.info(
+                                f"CT discovery total: {len(ct_domains)} unique .ir hostnames "
+                                f"(+{len(ct_domains) - before})"
+                            )
+
+                        if (
+                            len(ct_domains) == 0
+                            and stats["failed"] >= self.ct_fail_fast_shards
+                        ):
+                            logger.error(
+                                f"Stopping CT discovery early: {stats['failed']} shard(s) failed "
+                                "before any CT hostname was discovered. crt.sh is likely unavailable "
+                                "or blocking these queries from this VPS."
+                            )
+                            abort.set()
+
+                    if self.ct_query_delay:
+                        await asyncio.sleep(self.ct_query_delay)
+                finally:
+                    pending.task_done()
+
+        logger.info(
+            f"Starting CT discovery with {len(self.ct_prefixes)} shard(s), "
+            f"concurrency={self.ct_concurrency}, fail_fast_shards={self.ct_fail_fast_shards}"
+        )
+        tasks = [asyncio.create_task(ct_worker(i)) for i in range(self.ct_concurrency)]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         logger.info(f"Found {len(ct_domains)} unique CT-known .ir hostnames")
         if failed_shards:
@@ -437,8 +498,8 @@ class DomainChecker:
             domains = list(await self.process_ct_logs())
             if not domains:
                 raise RuntimeError(
-                    "CT discovery returned zero .ir hostnames after all shards. "
-                    "No fallback test scan was run. Try again later or check crt.sh/network availability."
+                    "CT discovery returned zero .ir hostnames. "
+                    "No fallback test scan was run. crt.sh appears unavailable for these queries from this VPS."
                 )
 
         logger.info(f"Starting checks on {len(domains)} domains...")
@@ -505,7 +566,7 @@ async def main():
         "-w",
         type=int,
         default=50,
-        help="Number of concurrent workers (default: 50)",
+        help="Number of concurrent domain-check workers (default: 50)",
     )
     parser.add_argument(
         "--timeout",
@@ -524,37 +585,49 @@ async def main():
     parser.add_argument(
         "--ct-timeout",
         type=int,
-        default=60,
-        help="Per-shard Certificate Transparency query timeout in seconds (default: 60)",
+        default=45,
+        help="Per-shard Certificate Transparency query timeout in seconds (default: 45)",
     )
     parser.add_argument(
         "--ct-retries",
         type=int,
-        default=2,
-        help="Per-shard Certificate Transparency query retry count (default: 2)",
+        default=1,
+        help="Per-shard Certificate Transparency query retry count (default: 1)",
     )
     parser.add_argument(
         "--ct-prefixes",
         default=DEFAULT_CT_PREFIXES,
-        help="Initial CT shard prefixes. Use a string like abc or comma-separated prefixes like a,b,1 (default: 0-9a-z)",
+        help="Initial CT shard prefixes. Use auto1, auto2, auto3, or comma-separated prefixes. Default: auto2",
     )
     parser.add_argument(
         "--ct-max-depth",
         type=int,
-        default=2,
-        help="Maximum prefix depth for splitting oversized CT shards (default: 2)",
+        default=3,
+        help="Maximum prefix depth for splitting oversized CT shards (default: 3)",
     )
     parser.add_argument(
         "--ct-query-delay",
         type=float,
-        default=1.0,
-        help="Delay between CT shard queries in seconds (default: 1.0)",
+        default=0.2,
+        help="Delay per CT worker between shard queries in seconds (default: 0.2)",
     )
     parser.add_argument(
         "--ct-max-response-mb",
         type=int,
-        default=50,
-        help="Maximum CT response size per shard in MiB before deeper sharding/skipping (default: 50)",
+        default=25,
+        help="Maximum CT response size per shard in MiB before deeper sharding/skipping (default: 25)",
+    )
+    parser.add_argument(
+        "--ct-concurrency",
+        type=int,
+        default=4,
+        help="Concurrent CT shard queries (default: 4)",
+    )
+    parser.add_argument(
+        "--ct-fail-fast-shards",
+        type=int,
+        default=20,
+        help="Stop CT discovery after this many failed shards if no domains were found (default: 20)",
     )
     parser.add_argument(
         "--domains",
@@ -578,6 +651,8 @@ async def main():
         ct_max_depth=args.ct_max_depth,
         ct_query_delay=args.ct_query_delay,
         ct_max_response_mb=args.ct_max_response_mb,
+        ct_concurrency=args.ct_concurrency,
+        ct_fail_fast_shards=args.ct_fail_fast_shards,
     ) as checker:
         await checker.run(domains=custom_domains)
 
