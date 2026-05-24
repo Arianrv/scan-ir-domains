@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set
 
 DEFAULT_CT_PREFIXES = "0123456789abcdefghijklmnopqrstuvwxyz"
+TRANSIENT_CT_STATUSES = {429, 500, 502, 503, 504}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 class CtResponseTooLarge(RuntimeError):
     """Raised when a CT query response exceeds the configured memory budget."""
+
+
+class CtTransientError(RuntimeError):
+    """Raised when a CT shard failed for a retryable reason."""
 
 
 class DomainChecker:
@@ -286,7 +291,7 @@ class DomainChecker:
                 logger.error(f"Worker {worker_id} error: {exc}")
                 self.queue.task_done()
 
-    async def _download_ct_json(self, query: str) -> Optional[List[Dict]]:
+    async def _download_ct_json(self, query: str) -> List[Dict]:
         session = self._require_session()
         url = "https://crt.sh/"
         params = {"q": query, "output": "json"}
@@ -297,9 +302,14 @@ class DomainChecker:
             params=params,
             timeout=aiohttp.ClientTimeout(total=self.ct_timeout),
         ) as resp:
+            if resp.status == 404:
+                logger.info(f"CT shard {query} has no results (HTTP 404)")
+                return []
+            if resp.status in TRANSIENT_CT_STATUSES:
+                raise CtTransientError(f"CT log query returned HTTP {resp.status} for {query}")
             if resp.status != 200:
-                logger.warning(f"CT log query returned HTTP {resp.status} for {query}")
-                return None
+                logger.warning(f"CT log query returned non-retryable HTTP {resp.status} for {query}")
+                return []
 
             content_length = resp.headers.get("Content-Length")
             if content_length and int(content_length) > self.ct_max_response_bytes:
@@ -316,13 +326,11 @@ class DomainChecker:
 
         try:
             parsed = json.loads(data.decode("utf-8", errors="replace"))
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse JSON from CT logs for {query}")
-            return None
+        except json.JSONDecodeError as exc:
+            raise CtTransientError(f"Failed to parse JSON from CT logs for {query}: {exc}") from exc
 
         if not isinstance(parsed, list):
-            logger.warning(f"Unexpected CT log response format for {query}")
-            return None
+            raise CtTransientError(f"Unexpected CT log response format for {query}")
         return parsed
 
     @staticmethod
@@ -347,25 +355,23 @@ class DomainChecker:
             )
             try:
                 rows = await self._download_ct_json(query)
-                if rows is None:
-                    domains: Set[str] = set()
-                else:
-                    domains = self._extract_ir_domains(rows)
+                domains = self._extract_ir_domains(rows)
                 logger.info(f"CT shard {query} returned {len(domains)} unique .ir hostnames")
                 return domains
             except CtResponseTooLarge as exc:
                 logger.warning(str(exc))
                 raise
-            except asyncio.TimeoutError:
-                logger.warning(f"CT log query timeout for {query}")
+            except (CtTransientError, asyncio.TimeoutError) as exc:
+                logger.warning(f"Retryable CT shard failure for {query}: {exc}")
             except Exception as exc:
-                logger.error(f"CT log query error for {query}: {exc}")
+                logger.error(f"Unexpected CT log query error for {query}: {exc}")
 
             if attempt < self.ct_retries:
                 delay = min(10 * attempt, 30)
                 logger.info(f"Retrying CT shard {query} in {delay}s")
                 await asyncio.sleep(delay)
 
+        logger.warning(f"CT shard {query} failed after {self.ct_retries} attempts")
         return None
 
     async def process_ct_logs(self) -> Set[str]:
@@ -374,6 +380,7 @@ class DomainChecker:
         Test-domain fallback is intentionally not allowed for production scans.
         """
         ct_domains: Set[str] = set()
+        failed_shards: List[str] = []
         pending: List[str] = list(self.ct_prefixes)
         processed: Set[str] = set()
 
@@ -394,9 +401,12 @@ class DomainChecker:
                         f"Skipping oversized CT shard {prefix!r}; increase --ct-max-depth "
                         "or --ct-max-response-mb for broader coverage"
                     )
+                    failed_shards.append(prefix)
                 shard_domains = None
 
-            if shard_domains:
+            if shard_domains is None:
+                failed_shards.append(prefix)
+            elif shard_domains:
                 before = len(ct_domains)
                 ct_domains.update(shard_domains)
                 logger.info(
@@ -408,6 +418,12 @@ class DomainChecker:
                 await asyncio.sleep(self.ct_query_delay)
 
         logger.info(f"Found {len(ct_domains)} unique CT-known .ir hostnames")
+        if failed_shards:
+            logger.warning(
+                f"CT discovery completed with {len(failed_shards)} failed shard(s): "
+                + ",".join(failed_shards[:20])
+                + ("..." if len(failed_shards) > 20 else "")
+            )
         return ct_domains
 
     async def run(self, domains: Optional[List[str]] = None):
