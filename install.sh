@@ -131,11 +131,12 @@ fi
 echo ""
 print_section "First Scan"
 echo ""
-echo "Run first full scan immediately after installation?"
-echo "  This will query Certificate Transparency logs and scan all discovered .ir domains."
+echo "Run first CT-known .ir scan immediately after installation?"
+echo "  This queries Certificate Transparency logs with sharded prefix queries."
+echo "  It scans CT-known .ir hostnames, not every registered .ir domain."
 echo "  If CT logs are temporarily unavailable, installation still succeeds and the scan is skipped."
 echo ""
-read -p "Run first full scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
+read -p "Run first CT-known .ir scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
 
 echo ""
@@ -145,7 +146,7 @@ echo "  Home: $CHECKER_DIR"
 echo "  Workers: $WORKERS"
 echo "  Timeout: ${TIMEOUT}s"
 echo "  Daily scan time: ${SCAN_TIME} UTC"
-echo "  Run first full scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
+echo "  Run first CT-known .ir scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
 echo ""
 read -p "Continue with installation? (y/n): " CONTINUE
 if [ "$CONTINUE" != "y" ]; then
@@ -240,7 +241,7 @@ echo ""
 echo -e "${BLUE}[7/9]${NC} ${YELLOW}Creating systemd service and timer${NC} (daily scheduler)..."
 cat > "/etc/systemd/system/domain-checker.service" <<SVCEOF
 [Unit]
-Description=scan-ir-domains - Iranian Domain Checker
+Description=scan-ir-domains - CT-known .ir Domain Checker
 After=network-online.target
 Wants=network-online.target
 
@@ -319,12 +320,12 @@ echo ""
 
 LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1 || true)
 if [ -n "$LATEST" ]; then
-    echo "Latest full scan: $(basename "$LATEST")"
+    echo "Latest CT-known .ir scan: $(basename "$LATEST")"
     echo "Size: $(du -h "$LATEST" | cut -f1)"
-    echo "Lines (domains): $(wc -l < "$LATEST")"
+    echo "Lines (hostnames): $(wc -l < "$LATEST")"
     echo "Age: $(date -r "$LATEST" '+%Y-%m-%d %H:%M:%S')"
 else
-    echo "Status: No full scans yet"
+    echo "Status: No CT-known .ir scans yet"
 fi
 
 echo ""
@@ -334,7 +335,7 @@ echo ""
 echo "Next scheduled scan:"
 systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker || echo "  Timer info unavailable"
 echo ""
-echo "Run a full scan now:"
+echo "Run a CT-known .ir scan now:"
 echo "  ./run_now.sh"
 echo ""
 echo "Run the fixed small test set:"
@@ -370,19 +371,19 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    print_section "Running First Full Scan..."
+    print_section "Running First CT-known .ir Scan..."
     echo ""
-    echo "Scanning .ir domains from Certificate Transparency logs..."
+    echo "Scanning CT-known .ir hostnames from Certificate Transparency logs..."
     echo "This may take several minutes depending on CT log availability and network speed."
     echo ""
 
     cd "$CHECKER_DIR"
     if sudo -u "$CHECKER_USER" "$CHECKER_DIR/run_now.sh"; then
         echo ""
-        echo -e "${GREEN}✓ First full scan complete!${NC}"
+        echo -e "${GREEN}✓ First CT-known .ir scan complete!${NC}"
     else
         echo ""
-        echo -e "${YELLOW}⚠ First full scan did not complete.${NC}"
+        echo -e "${YELLOW}⚠ First CT-known .ir scan did not complete.${NC}"
         echo "  Certificate Transparency discovery may be temporarily unavailable."
         echo "  No fallback test scan was saved as a real result."
         echo "  Retry manually:"
@@ -393,7 +394,7 @@ fi
 
 print_section "Next Steps - How to Use"
 echo ""
-echo -e "${GREEN}1. Start a Full Scan Now${NC}"
+echo -e "${GREEN}1. Start a CT-known .ir Scan Now${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
 echo ""
 echo -e "${GREEN}2. Start via systemd Now${NC}"
