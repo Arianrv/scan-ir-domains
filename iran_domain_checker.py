@@ -14,6 +14,10 @@ Scope note:
     There is no public complete dump of every registered .ir domain here. CT
     discovery can only find CT-known .ir hostnames, not every registered .ir.
 
+Output model:
+    Only accessible domains are saved to the JSONL result file. A companion text
+    file is also written with two columns: Domain and ip.
+
 Examples:
     python3 iran_domain_checker.py --domains diver.ir,nic.ir,time.ir
     python3 iran_domain_checker.py --input-file data/domains.txt --source file
@@ -61,6 +65,7 @@ class DomainChecker:
     def __init__(
         self,
         output_file: str = "iran_domains_accessible.jsonl",
+        accessible_text_file: Optional[str] = None,
         workers: int = 50,
         timeout: int = 10,
         batch_size: int = 10,
@@ -78,6 +83,7 @@ class DomainChecker:
         save_discovered: bool = True,
     ):
         self.output_file = output_file
+        self.accessible_text_file = accessible_text_file or str(Path(output_file).with_suffix(".txt"))
         self.workers = workers
         self.timeout = timeout
         self.batch_size = batch_size
@@ -97,6 +103,11 @@ class DomainChecker:
         self.checked_domains: Set[str] = set()
         self.results_buffer: List[Dict] = []
         self.write_lock = asyncio.Lock()
+        self.file_write_lock = asyncio.Lock()
+        self.stats_lock = asyncio.Lock()
+        self.total_checked = 0
+        self.total_accessible = 0
+        self.total_inaccessible = 0
         self.session: Optional[aiohttp.ClientSession] = None
         self.queue: asyncio.Queue = asyncio.Queue()
 
@@ -304,17 +315,43 @@ class DomainChecker:
         return result
 
     async def _write_results(self, batch: Sequence[Dict]) -> None:
-        if not batch:
+        accessible_batch = [result for result in batch if result.get("accessible") is True]
+        if not accessible_batch:
             return
         try:
             output_path = Path(self.output_file)
+            text_path = Path(self.accessible_text_file)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            async with aiofiles.open(output_path, "a") as f:
-                for result in batch:
-                    await f.write(json.dumps(result) + "\n")
-            logger.info(f"💾 Saved {len(batch)} results to {self.output_file}")
+            text_path.parent.mkdir(parents=True, exist_ok=True)
+
+            async with self.file_write_lock:
+                async with aiofiles.open(output_path, "a") as f:
+                    for result in accessible_batch:
+                        await f.write(json.dumps(result) + "\n")
+
+                needs_header = not text_path.exists() or text_path.stat().st_size == 0
+                async with aiofiles.open(text_path, "a") as f:
+                    if needs_header:
+                        await f.write(f"{'Domain':<48} ip\n")
+                    for result in accessible_batch:
+                        await f.write(f"{result.get('domain', ''):<48} {result.get('ip') or ''}\n")
+
+            logger.info(
+                f"💾 Saved {len(accessible_batch)} accessible results to {self.output_file} and {self.accessible_text_file}"
+            )
         except Exception as exc:
-            logger.error(f"Failed to save batch: {exc}")
+            logger.error(f"Failed to save accessible batch: {exc}")
+
+    async def record_result(self, result: Dict) -> None:
+        async with self.stats_lock:
+            self.total_checked += 1
+            if result.get("accessible") is True:
+                self.total_accessible += 1
+            else:
+                self.total_inaccessible += 1
+
+        if result.get("accessible") is True:
+            await self.buffer_result(result)
 
     async def buffer_result(self, result: Dict) -> None:
         batch_to_write: List[Dict] = []
@@ -344,7 +381,7 @@ class DomainChecker:
             try:
                 result = await self.check_domain(domain)
                 if result:
-                    await self.buffer_result(result)
+                    await self.record_result(result)
                 self.queue.task_done()
             except Exception as exc:
                 logger.error(f"Worker {worker_id} error: {exc}")
@@ -524,6 +561,7 @@ class DomainChecker:
     async def run(self, domains: Optional[List[str]] = None):
         logger.info("=== Iranian Domain Checker Starting ===")
         logger.info(f"Output file: {self.output_file}")
+        logger.info(f"Accessible text file: {self.accessible_text_file}")
         logger.info(f"Workers: {self.workers}, Timeout: {self.timeout}s, Batch: {self.batch_size}")
         logger.info(f"Domain source: {self.source}")
 
@@ -548,41 +586,35 @@ class DomainChecker:
 
         elapsed = time.time() - start_time
         logger.info(f"=== Completed in {elapsed:.1f}s ===")
-        logger.info(f"Checked domains: {len(self.checked_domains)}")
-        logger.info(f"Results saved to: {self.output_file}")
+        logger.info(f"Checked domains: {self.total_checked}")
+        logger.info(f"Accessible domains saved: {self.total_accessible}")
+        logger.info(f"Inaccessible domains skipped: {self.total_inaccessible}")
+        logger.info(f"Accessible JSONL saved to: {self.output_file}")
+        logger.info(f"Accessible text saved to: {self.accessible_text_file}")
         self._print_summary()
 
     def _print_summary(self):
-        try:
-            accessible_count = 0
-            total_count = 0
-            with open(self.output_file, "r") as f:
-                for line in f:
-                    try:
-                        result = json.loads(line)
-                        total_count += 1
-                        if result.get("accessible"):
-                            accessible_count += 1
-                    except json.JSONDecodeError:
-                        continue
-            logger.info("\n📊 Summary:")
-            logger.info(f"  Total checked: {total_count}")
-            logger.info(f"  Accessible: {accessible_count}")
-            logger.info(f"  Blocked: {total_count - accessible_count}")
-            if total_count > 0:
-                logger.info(f"  Accessibility rate: {100 * accessible_count / total_count:.1f}%")
-        except FileNotFoundError:
-            pass
+        logger.info("\n📊 Summary:")
+        logger.info(f"  Total checked: {self.total_checked}")
+        logger.info(f"  Accessible saved: {self.total_accessible}")
+        logger.info(f"  Inaccessible skipped: {self.total_inaccessible}")
+        if self.total_checked > 0:
+            logger.info(f"  Accessibility rate: {100 * self.total_accessible / self.total_checked:.1f}%")
 
 
 async def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Check .ir domain accessibility from this VPS/network")
-    parser.add_argument("--output", "-o", default="iran_domains_accessible.jsonl", help="Output JSONL file")
+    parser.add_argument("--output", "-o", default="iran_domains_accessible.jsonl", help="Accessible-only JSONL output file")
+    parser.add_argument(
+        "--accessible-output",
+        default=None,
+        help="Accessible-only text output file with columns: Domain and ip. Default: output path with .txt suffix",
+    )
     parser.add_argument("--workers", "-w", type=int, default=50, help="Concurrent domain-check workers")
     parser.add_argument("--timeout", "-t", type=int, default=10, help="Timeout per domain check in seconds")
-    parser.add_argument("--batch", "-b", type=int, default=10, help="Save results every N domains")
+    parser.add_argument("--batch", "-b", type=int, default=10, help="Save accessible results every N domains")
     parser.add_argument(
         "--source",
         choices=["auto", "file", "ct"],
@@ -612,6 +644,7 @@ async def main():
 
     async with DomainChecker(
         output_file=args.output,
+        accessible_text_file=args.accessible_output,
         workers=args.workers,
         timeout=args.timeout,
         batch_size=args.batch,
