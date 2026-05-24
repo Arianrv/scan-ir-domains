@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 REPO_URL="https://github.com/Arianrv/scan-ir-domains.git"
-REQUIRED_FILES=("iran_domain_checker.py" "analyze_results.py" "install.sh")
+REQUIRED_FILES=("iran_domain_checker.py" "analyze_results.py" "collect_domains.py" "install.sh")
 TEST_DOMAINS="diver.ir,nic.ir,time.ir"
 TMP_DIR=""
 
@@ -132,9 +132,9 @@ echo ""
 print_section "First Scan"
 echo ""
 echo "Run first scan immediately after installation?"
-echo "  Default source order: local data/domains.txt, then cache, then optional CT discovery."
-echo "  Add more .ir domains to data/domains.txt for broader coverage."
-echo "  CT discovery is optional enrichment only, not the primary required source."
+echo "  Every manual and scheduled scan now fetches Common Crawl .ir domains first."
+echo "  Then it merges them into data/domains.txt and scans that local source list."
+echo "  If Common Crawl is temporarily unavailable, existing domains.txt is still scanned."
 echo ""
 read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
@@ -209,6 +209,7 @@ EOF
 fi
 chown -R "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR"
 chmod -R u+rwX,go+rX "$CHECKER_DIR"
+chmod +x "$CHECKER_DIR/collect_domains.py" "$CHECKER_DIR/iran_domain_checker.py" "$CHECKER_DIR/analyze_results.py"
 
 for required_file in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "$CHECKER_DIR/$required_file" ]; then
@@ -241,15 +242,43 @@ TEST=$($CHECKER_DIR/venv/bin/python3 -c "import aiohttp, aiofiles, certifi, requ
 if [ "$TEST" != "ok" ]; then
     fail "Installation test failed"
 fi
+$CHECKER_DIR/venv/bin/python3 -m py_compile "$CHECKER_DIR/collect_domains.py" "$CHECKER_DIR/iran_domain_checker.py" "$CHECKER_DIR/analyze_results.py"
 echo "  └─ Required files verified"
 echo "  └─ Python packages verified"
+echo "  └─ Python scripts compile"
 echo -e "${GREEN}✓ Installation test passed${NC}"
 echo ""
 
 echo -e "${BLUE}[7/9]${NC} ${YELLOW}Creating systemd service and timer${NC} (daily scheduler)..."
+cat > "$CHECKER_DIR/fetch_and_scan.sh" <<SCRIPTEOF
+#!/bin/bash
+set -euo pipefail
+cd "$CHECKER_DIR"
+
+FETCH_LOG="$CHECKER_DIR/logs/fetch_\$(date +%Y%m%d_%H%M%S).log"
+SCAN_OUTPUT="$CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl"
+
+"$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/collect_domains.py" \\
+  --output "$CHECKER_DIR/data/domains.txt" \\
+  --indexes 3 \\
+  --limit-per-index 200000 \\
+  --timeout 180 \\
+  > "\$FETCH_LOG" 2>&1 || true
+
+exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
+  --source file \\
+  --input-file "$CHECKER_DIR/data/domains.txt" \\
+  --output "\$SCAN_OUTPUT" \\
+  --workers "$WORKERS" \\
+  --timeout "$TIMEOUT" \\
+  --batch 10
+SCRIPTEOF
+chmod +x "$CHECKER_DIR/fetch_and_scan.sh"
+chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/fetch_and_scan.sh"
+
 cat > "/etc/systemd/system/domain-checker.service" <<SVCEOF
 [Unit]
-Description=scan-ir-domains - .ir Domain Checker
+Description=scan-ir-domains - Fetch .ir Domains and Scan
 After=network-online.target
 Wants=network-online.target
 
@@ -258,7 +287,7 @@ Type=oneshot
 User=$CHECKER_USER
 WorkingDirectory=$CHECKER_DIR
 Environment="PATH=$CHECKER_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-ExecStart=/bin/bash -lc 'cd "$CHECKER_DIR" && "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" --source auto --input-file "$CHECKER_DIR/data/domains.txt" --cache-file "$CHECKER_DIR/data/domain_cache.txt" --output "$CHECKER_DIR/results/scan_\$(date +%%Y%%m%%d_%%H%%M%%S).jsonl" --workers $WORKERS --timeout $TIMEOUT --batch 10'
+ExecStart=$CHECKER_DIR/fetch_and_scan.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=domain-checker
@@ -269,7 +298,7 @@ SVCEOF
 
 cat > "/etc/systemd/system/domain-checker.timer" <<TMREOF
 [Unit]
-Description=Run scan-ir-domains daily at $SCAN_TIME UTC
+Description=Fetch .ir domains and run scan-ir-domains daily at $SCAN_TIME UTC
 Requires=domain-checker.service
 
 [Timer]
@@ -288,7 +317,7 @@ fi
 systemctl daemon-reload
 systemctl enable domain-checker.timer > /dev/null 2>&1
 systemctl restart domain-checker.timer > /dev/null 2>&1
-echo "  └─ Created systemd service"
+echo "  └─ Created fetch-and-scan systemd service"
 echo "  └─ Created daily timer (runs at ${SCAN_TIME} UTC)"
 echo "  └─ Timer enabled and started"
 echo -e "${GREEN}✓ Systemd service created${NC}"
@@ -298,15 +327,18 @@ echo -e "${BLUE}[8/9]${NC} ${YELLOW}Creating helper scripts${NC}..."
 cat > "$CHECKER_DIR/run_now.sh" <<SCRIPTEOF
 #!/bin/bash
 set -euo pipefail
+exec "$CHECKER_DIR/fetch_and_scan.sh"
+SCRIPTEOF
+
+cat > "$CHECKER_DIR/fetch_domains.sh" <<SCRIPTEOF
+#!/bin/bash
+set -euo pipefail
 cd "$CHECKER_DIR"
-exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
-  --source auto \\
-  --input-file "$CHECKER_DIR/data/domains.txt" \\
-  --cache-file "$CHECKER_DIR/data/domain_cache.txt" \\
-  --output "$CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl" \\
-  --workers "$WORKERS" \\
-  --timeout "$TIMEOUT" \\
-  --batch 10
+exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/collect_domains.py" \\
+  --output "$CHECKER_DIR/data/domains.txt" \\
+  --indexes 3 \\
+  --limit-per-index 200000 \\
+  --timeout 180
 SCRIPTEOF
 
 cat > "$CHECKER_DIR/ct_discover.sh" <<SCRIPTEOF
@@ -357,25 +389,29 @@ echo "Domain source files:"
 echo "  data/domains.txt:      $(wc -l < data/domains.txt 2>/dev/null || echo 0) lines"
 echo "  data/domain_cache.txt: $(wc -l < data/domain_cache.txt 2>/dev/null || echo 0) lines"
 echo ""
+echo "Latest fetch log:"
+ls -t logs/fetch_*.log 2>/dev/null | head -1 || echo "  none"
+echo ""
 echo "Disk usage:"
 du -sh results/ logs/ data/ 2>/dev/null || echo "  N/A"
 echo ""
 echo "Next scheduled scan:"
 systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker || echo "  Timer info unavailable"
 echo ""
-echo "Run scan from local list/cache now:"
-echo "  ./run_now.sh"
+echo "Fetch domains only:"
+echo "  ./fetch_domains.sh"
 echo ""
-echo "Try CT discovery/cache refresh manually:"
-echo "  ./ct_discover.sh"
+echo "Fetch then scan now:"
+echo "  ./run_now.sh"
 echo ""
 echo "Run the fixed small test set:"
 echo "  ./test_domains.sh"
 SCRIPTEOF
-chmod +x "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
-chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
+chmod +x "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/fetch_domains.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
+chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/fetch_domains.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
 echo "  └─ Created: status.sh"
 echo "  └─ Created: run_now.sh"
+echo "  └─ Created: fetch_domains.sh"
 echo "  └─ Created: ct_discover.sh"
 echo "  └─ Created: test_domains.sh"
 echo -e "${GREEN}✓ Helper scripts created${NC}"
@@ -403,19 +439,19 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    print_section "Running First Scan..."
+    print_section "Running First Fetch + Scan..."
     echo ""
-    echo "Scanning local data/domains.txt first. CT is only used if the local list/cache is empty."
+    echo "Fetching .ir domains from Common Crawl into data/domains.txt, then scanning."
     echo ""
 
     cd "$CHECKER_DIR"
     if sudo -u "$CHECKER_USER" "$CHECKER_DIR/run_now.sh"; then
         echo ""
-        echo -e "${GREEN}✓ First scan complete!${NC}"
+        echo -e "${GREEN}✓ First fetch + scan complete!${NC}"
     else
         echo ""
-        echo -e "${YELLOW}⚠ First scan did not complete.${NC}"
-        echo "  Add .ir domains to: $CHECKER_DIR/data/domains.txt"
+        echo -e "${YELLOW}⚠ First fetch + scan did not complete.${NC}"
+        echo "  Check logs in: $CHECKER_DIR/logs/"
         echo "  Retry manually:"
         echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
     fi
@@ -424,32 +460,29 @@ fi
 
 print_section "Next Steps - How to Use"
 echo ""
-echo -e "${GREEN}1. Add more domains${NC}"
-echo "   nano $CHECKER_DIR/data/domains.txt"
-echo ""
-echo -e "${GREEN}2. Start a Scan Now${NC}"
+echo -e "${GREEN}1. Start Fetch + Scan Now${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
 echo ""
-echo -e "${GREEN}3. Try CT Discovery Manually${NC}"
-echo "   sudo -u $CHECKER_USER $CHECKER_DIR/ct_discover.sh"
+echo -e "${GREEN}2. Fetch Domains Only${NC}"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/fetch_domains.sh"
 echo ""
-echo -e "${GREEN}4. Start via systemd Now${NC}"
+echo -e "${GREEN}3. Start via systemd Now${NC}"
 echo "   sudo systemctl start domain-checker.service"
 echo ""
-echo -e "${GREEN}5. Check Status${NC}"
+echo -e "${GREEN}4. Check Status${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
 echo ""
-echo -e "${GREEN}6. View Live Logs${NC}"
+echo -e "${GREEN}5. View Live Logs${NC}"
 echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
-echo -e "${GREEN}7. Manual Test Scan${NC}"
+echo -e "${GREEN}6. Manual Test Scan${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/test_domains.sh"
 echo "   Domains: $TEST_DOMAINS"
 echo ""
-echo -e "${GREEN}8. View Results${NC}"
+echo -e "${GREEN}7. View Results${NC}"
 echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
-echo -e "${GREEN}9. Analyze Results${NC}"
+echo -e "${GREEN}8. Analyze Results${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
 echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
@@ -457,7 +490,7 @@ echo ""
 
 print_section "Timer Configuration"
 echo ""
-echo -e "${YELLOW}✓ Daily scans are scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
+echo -e "${YELLOW}✓ Daily fetch + scan is scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
 echo "  Check next run: sudo systemctl list-timers domain-checker.timer"
 echo ""
 
@@ -468,5 +501,5 @@ echo "   bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-dom
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}✓ All done! Automated scanning is now configured.${NC}"
+echo -e "${GREEN}✓ All done! Automated fetching and scanning is now configured.${NC}"
 echo ""
