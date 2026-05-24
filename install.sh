@@ -131,12 +131,12 @@ fi
 echo ""
 print_section "First Scan"
 echo ""
-echo "Run first CT-known .ir scan immediately after installation?"
-echo "  This queries Certificate Transparency logs with sharded prefix queries."
-echo "  It scans CT-known .ir hostnames, not every registered .ir domain."
-echo "  If CT logs are temporarily unavailable, installation still succeeds and the scan is skipped."
+echo "Run first scan immediately after installation?"
+echo "  Default source order: local data/domains.txt, then cache, then optional CT discovery."
+echo "  Add more .ir domains to data/domains.txt for broader coverage."
+echo "  CT discovery is optional enrichment only, not the primary required source."
 echo ""
-read -p "Run first CT-known .ir scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
+read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
 
 echo ""
@@ -146,7 +146,7 @@ echo "  Home: $CHECKER_DIR"
 echo "  Workers: $WORKERS"
 echo "  Timeout: ${TIMEOUT}s"
 echo "  Daily scan time: ${SCAN_TIME} UTC"
-echo "  Run first CT-known .ir scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
+echo "  Run first scan: $([ "$RUN_FIRST_SCAN" = "y" ] && echo "Yes" || echo "No")"
 echo ""
 read -p "Continue with installation? (y/n): " CONTINUE
 if [ "$CONTINUE" != "y" ]; then
@@ -200,6 +200,13 @@ fi
 
 cp -a "$REPO_DIR"/. "$CHECKER_DIR"/
 mkdir -p "$CHECKER_DIR"/{data,logs,results}
+if [ ! -s "$CHECKER_DIR/data/domains.txt" ]; then
+    cat > "$CHECKER_DIR/data/domains.txt" <<EOF
+diver.ir
+nic.ir
+time.ir
+EOF
+fi
 chown -R "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR"
 chmod -R u+rwX,go+rX "$CHECKER_DIR"
 
@@ -211,6 +218,7 @@ for required_file in "${REQUIRED_FILES[@]}"; do
 done
 
 echo "  └─ Created: $CHECKER_DIR/data"
+echo "  └─ Created: $CHECKER_DIR/data/domains.txt"
 echo "  └─ Created: $CHECKER_DIR/logs"
 echo "  └─ Created: $CHECKER_DIR/results"
 echo -e "${GREEN}✓ Repository cloned and verified${NC}"
@@ -241,7 +249,7 @@ echo ""
 echo -e "${BLUE}[7/9]${NC} ${YELLOW}Creating systemd service and timer${NC} (daily scheduler)..."
 cat > "/etc/systemd/system/domain-checker.service" <<SVCEOF
 [Unit]
-Description=scan-ir-domains - CT-known .ir Domain Checker
+Description=scan-ir-domains - .ir Domain Checker
 After=network-online.target
 Wants=network-online.target
 
@@ -250,7 +258,7 @@ Type=oneshot
 User=$CHECKER_USER
 WorkingDirectory=$CHECKER_DIR
 Environment="PATH=$CHECKER_DIR/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
-ExecStart=/bin/bash -lc 'cd "$CHECKER_DIR" && "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" --output "$CHECKER_DIR/results/scan_\$(date +%%Y%%m%%d_%%H%%M%%S).jsonl" --workers $WORKERS --timeout $TIMEOUT --batch 10'
+ExecStart=/bin/bash -lc 'cd "$CHECKER_DIR" && "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" --source auto --input-file "$CHECKER_DIR/data/domains.txt" --cache-file "$CHECKER_DIR/data/domain_cache.txt" --output "$CHECKER_DIR/results/scan_\$(date +%%Y%%m%%d_%%H%%M%%S).jsonl" --workers $WORKERS --timeout $TIMEOUT --batch 10'
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=domain-checker
@@ -292,7 +300,23 @@ cat > "$CHECKER_DIR/run_now.sh" <<SCRIPTEOF
 set -euo pipefail
 cd "$CHECKER_DIR"
 exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
+  --source auto \\
+  --input-file "$CHECKER_DIR/data/domains.txt" \\
+  --cache-file "$CHECKER_DIR/data/domain_cache.txt" \\
   --output "$CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl" \\
+  --workers "$WORKERS" \\
+  --timeout "$TIMEOUT" \\
+  --batch 10
+SCRIPTEOF
+
+cat > "$CHECKER_DIR/ct_discover.sh" <<SCRIPTEOF
+#!/bin/bash
+set -euo pipefail
+cd "$CHECKER_DIR"
+exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
+  --source ct \\
+  --cache-file "$CHECKER_DIR/data/domain_cache.txt" \\
+  --output "$CHECKER_DIR/results/ct_scan_\$(date +%Y%m%d_%H%M%S).jsonl" \\
   --workers "$WORKERS" \\
   --timeout "$TIMEOUT" \\
   --batch 10
@@ -320,14 +344,18 @@ echo ""
 
 LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1 || true)
 if [ -n "$LATEST" ]; then
-    echo "Latest CT-known .ir scan: $(basename "$LATEST")"
+    echo "Latest scan: $(basename "$LATEST")"
     echo "Size: $(du -h "$LATEST" | cut -f1)"
-    echo "Lines (hostnames): $(wc -l < "$LATEST")"
+    echo "Lines (domains): $(wc -l < "$LATEST")"
     echo "Age: $(date -r "$LATEST" '+%Y-%m-%d %H:%M:%S')"
 else
-    echo "Status: No CT-known .ir scans yet"
+    echo "Status: No scans yet"
 fi
 
+echo ""
+echo "Domain source files:"
+echo "  data/domains.txt:      $(wc -l < data/domains.txt 2>/dev/null || echo 0) lines"
+echo "  data/domain_cache.txt: $(wc -l < data/domain_cache.txt 2>/dev/null || echo 0) lines"
 echo ""
 echo "Disk usage:"
 du -sh results/ logs/ data/ 2>/dev/null || echo "  N/A"
@@ -335,16 +363,20 @@ echo ""
 echo "Next scheduled scan:"
 systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker || echo "  Timer info unavailable"
 echo ""
-echo "Run a CT-known .ir scan now:"
+echo "Run scan from local list/cache now:"
 echo "  ./run_now.sh"
+echo ""
+echo "Try CT discovery/cache refresh manually:"
+echo "  ./ct_discover.sh"
 echo ""
 echo "Run the fixed small test set:"
 echo "  ./test_domains.sh"
 SCRIPTEOF
-chmod +x "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh"
-chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh"
+chmod +x "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
+chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh" "$CHECKER_DIR/ct_discover.sh"
 echo "  └─ Created: status.sh"
 echo "  └─ Created: run_now.sh"
+echo "  └─ Created: ct_discover.sh"
 echo "  └─ Created: test_domains.sh"
 echo -e "${GREEN}✓ Helper scripts created${NC}"
 echo ""
@@ -371,21 +403,19 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    print_section "Running First CT-known .ir Scan..."
+    print_section "Running First Scan..."
     echo ""
-    echo "Scanning CT-known .ir hostnames from Certificate Transparency logs..."
-    echo "This may take several minutes depending on CT log availability and network speed."
+    echo "Scanning local data/domains.txt first. CT is only used if the local list/cache is empty."
     echo ""
 
     cd "$CHECKER_DIR"
     if sudo -u "$CHECKER_USER" "$CHECKER_DIR/run_now.sh"; then
         echo ""
-        echo -e "${GREEN}✓ First CT-known .ir scan complete!${NC}"
+        echo -e "${GREEN}✓ First scan complete!${NC}"
     else
         echo ""
-        echo -e "${YELLOW}⚠ First CT-known .ir scan did not complete.${NC}"
-        echo "  Certificate Transparency discovery may be temporarily unavailable."
-        echo "  No fallback test scan was saved as a real result."
+        echo -e "${YELLOW}⚠ First scan did not complete.${NC}"
+        echo "  Add .ir domains to: $CHECKER_DIR/data/domains.txt"
         echo "  Retry manually:"
         echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
     fi
@@ -394,44 +424,41 @@ fi
 
 print_section "Next Steps - How to Use"
 echo ""
-echo -e "${GREEN}1. Start a CT-known .ir Scan Now${NC}"
+echo -e "${GREEN}1. Add more domains${NC}"
+echo "   nano $CHECKER_DIR/data/domains.txt"
+echo ""
+echo -e "${GREEN}2. Start a Scan Now${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
 echo ""
-echo -e "${GREEN}2. Start via systemd Now${NC}"
+echo -e "${GREEN}3. Try CT Discovery Manually${NC}"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/ct_discover.sh"
+echo ""
+echo -e "${GREEN}4. Start via systemd Now${NC}"
 echo "   sudo systemctl start domain-checker.service"
 echo ""
-echo -e "${GREEN}3. Check Status${NC}"
+echo -e "${GREEN}5. Check Status${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
 echo ""
-echo -e "${GREEN}4. View Live Logs${NC}"
+echo -e "${GREEN}6. View Live Logs${NC}"
 echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
-echo -e "${GREEN}5. Manual Test Scan${NC}"
+echo -e "${GREEN}7. Manual Test Scan${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/test_domains.sh"
 echo "   Domains: $TEST_DOMAINS"
 echo ""
-echo -e "${GREEN}6. View Results${NC}"
+echo -e "${GREEN}8. View Results${NC}"
 echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
-echo -e "${GREEN}7. Analyze Results${NC}"
+echo -e "${GREEN}9. Analyze Results${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
 echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
-echo ""
-echo -e "${GREEN}8. Download Results to Local Machine${NC}"
-echo "   scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/"
 echo ""
 
 print_section "Timer Configuration"
 echo ""
 echo -e "${YELLOW}✓ Daily scans are scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
 echo "  Check next run: sudo systemctl list-timers domain-checker.timer"
-echo ""
-echo -e "${YELLOW}To change scan time:${NC}"
-echo "  sudo nano /etc/systemd/system/domain-checker.timer"
-echo "  Edit the line: OnCalendar=*-*-* ${SCAN_TIME}:00"
-echo "  Example for 14:00 UTC: OnCalendar=*-*-* 14:00:00"
-echo "  Then: sudo systemctl daemon-reload && sudo systemctl restart domain-checker.timer"
 echo ""
 
 print_section "Uninstallation"
