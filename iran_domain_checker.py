@@ -3,11 +3,16 @@
 Iranian Domain Accessibility Checker
 https://github.com/Arianrv/scan-ir-domains
 =====================================
-Checks which Iranian domains (.ir) are accessible from outside Iran.
-Streams domains from Certificate Transparency logs, performs async checks, and saves JSONL results.
+Checks CT-known .ir hostnames from an external VPS/network.
+
+Important scope note:
+    This does not enumerate every registered .ir domain. It enumerates .ir hostnames
+    visible in public Certificate Transparency data and then checks reachability from
+    the machine where the scanner runs.
 
 Usage:
     python3 iran_domain_checker.py [--output results.jsonl] [--workers 50] [--timeout 10]
+    python3 iran_domain_checker.py --domains diver.ir,nic.ir,time.ir
 
 Requirements:
     pip install aiohttp aiofiles certifi requests
@@ -23,7 +28,9 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set
+
+DEFAULT_CT_PREFIXES = "0123456789abcdefghijklmnopqrstuvwxyz"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,10 +43,15 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class CtResponseTooLarge(RuntimeError):
+    """Raised when a CT query response exceeds the configured memory budget."""
+
+
 class DomainChecker:
     """
-    Checks Iranian domain accessibility from outside Iran.
-    Streams from CT logs, deduplicates, runs async checks, saves batches.
+    Checks CT-known .ir hostname accessibility from the current VPS/network.
+    CT discovery is sharded by hostname prefix so crt.sh is not asked for the
+    whole .ir namespace in one fragile query.
     """
 
     def __init__(
@@ -48,8 +60,12 @@ class DomainChecker:
         workers: int = 50,
         timeout: int = 10,
         batch_size: int = 10,
-        ct_timeout: int = 180,
-        ct_retries: int = 3,
+        ct_timeout: int = 60,
+        ct_retries: int = 2,
+        ct_prefixes: str = DEFAULT_CT_PREFIXES,
+        ct_max_depth: int = 2,
+        ct_query_delay: float = 1.0,
+        ct_max_response_mb: int = 50,
     ):
         self.output_file = output_file
         self.workers = workers
@@ -57,11 +73,37 @@ class DomainChecker:
         self.batch_size = batch_size
         self.ct_timeout = ct_timeout
         self.ct_retries = ct_retries
+        self.ct_prefixes = self._normalize_prefixes(ct_prefixes)
+        self.ct_shard_chars = self._normalize_prefixes(DEFAULT_CT_PREFIXES)
+        self.ct_max_depth = max(1, ct_max_depth)
+        self.ct_query_delay = max(0.0, ct_query_delay)
+        self.ct_max_response_bytes = max(1, ct_max_response_mb) * 1024 * 1024
         self.checked_domains: Set[str] = set()
         self.results_buffer: List[Dict] = []
         self.write_lock = asyncio.Lock()
         self.session: Optional[aiohttp.ClientSession] = None
         self.queue: asyncio.Queue = asyncio.Queue()
+
+    @staticmethod
+    def _normalize_prefixes(raw_prefixes: str) -> List[str]:
+        if "," in raw_prefixes:
+            candidates = [item.strip().lower() for item in raw_prefixes.split(",")]
+        else:
+            candidates = [char.lower() for char in raw_prefixes if not char.isspace()]
+
+        prefixes: List[str] = []
+        seen: Set[str] = set()
+        for prefix in candidates:
+            if not prefix or prefix in seen:
+                continue
+            if not all(char.isalnum() or char == "-" for char in prefix):
+                raise ValueError(f"Invalid CT prefix: {prefix!r}")
+            seen.add(prefix)
+            prefixes.append(prefix)
+
+        if not prefixes:
+            raise ValueError("At least one CT prefix is required")
+        return prefixes
 
     async def __aenter__(self):
         connector = aiohttp.TCPConnector(
@@ -90,20 +132,35 @@ class DomainChecker:
     async def resolve_dns(self, domain: str) -> Optional[str]:
         try:
             loop = asyncio.get_event_loop()
-            ip = await asyncio.wait_for(
-                loop.getaddrinfo(domain, 443, family=socket.AF_INET),
+            infos = await asyncio.wait_for(
+                loop.getaddrinfo(
+                    domain,
+                    443,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                ),
                 timeout=self.timeout,
             )
-            return ip[0][4][0] if ip else None
+            for info in infos:
+                address = info[4][0]
+                if address:
+                    return address
+            return None
         except (socket.gaierror, asyncio.TimeoutError, OSError):
             return None
+
+    @staticmethod
+    def _url_host(ip_or_host: str) -> str:
+        if ":" in ip_or_host and not ip_or_host.startswith("["):
+            return f"[{ip_or_host}]"
+        return ip_or_host
 
     async def check_http_status(self, domain: str, ip: Optional[str] = None) -> Optional[int]:
         session = self._require_session()
         urls = [f"https://{domain}/", f"http://{domain}/"]
 
         if ip:
-            urls.append(f"https://{ip}/")
+            urls.append(f"https://{self._url_host(ip)}/")
 
         for url in urls:
             try:
@@ -149,7 +206,7 @@ class DomainChecker:
             "http_status": None,
             "tls_valid": False,
             "ip": None,
-            "checked_from": "external",
+            "checked_from": "external_vps",
         }
 
         try:
@@ -179,21 +236,39 @@ class DomainChecker:
 
         return result
 
-    async def save_batch(self, force: bool = False):
-        async with self.write_lock:
-            if len(self.results_buffer) >= self.batch_size or (force and self.results_buffer):
-                try:
-                    output_path = Path(self.output_file)
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                    async with aiofiles.open(output_path, "a") as f:
-                        for result in self.results_buffer:
-                            await f.write(json.dumps(result) + "\n")
+    async def _write_results(self, batch: Sequence[Dict]) -> None:
+        if not batch:
+            return
+        try:
+            output_path = Path(self.output_file)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(output_path, "a") as f:
+                for result in batch:
+                    await f.write(json.dumps(result) + "\n")
+            logger.info(f"💾 Saved {len(batch)} results to {self.output_file}")
+        except Exception as exc:
+            logger.error(f"Failed to save batch: {exc}")
 
-                    count = len(self.results_buffer)
-                    logger.info(f"💾 Saved {count} results to {self.output_file}")
-                    self.results_buffer = []
-                except Exception as exc:
-                    logger.error(f"Failed to save batch: {exc}")
+    async def buffer_result(self, result: Dict) -> None:
+        batch_to_write: List[Dict] = []
+        async with self.write_lock:
+            self.results_buffer.append(result)
+            if len(self.results_buffer) >= self.batch_size:
+                batch_to_write = self.results_buffer
+                self.results_buffer = []
+
+        if batch_to_write:
+            await self._write_results(batch_to_write)
+
+    async def flush_results(self) -> None:
+        batch_to_write: List[Dict] = []
+        async with self.write_lock:
+            if self.results_buffer:
+                batch_to_write = self.results_buffer
+                self.results_buffer = []
+
+        if batch_to_write:
+            await self._write_results(batch_to_write)
 
     async def worker(self, worker_id: int):
         while True:
@@ -205,73 +280,134 @@ class DomainChecker:
             try:
                 result = await self.check_domain(domain)
                 if result:
-                    self.results_buffer.append(result)
-
-                    if len(self.results_buffer) >= self.batch_size:
-                        await self.save_batch()
-
+                    await self.buffer_result(result)
                 self.queue.task_done()
             except Exception as exc:
                 logger.error(f"Worker {worker_id} error: {exc}")
                 self.queue.task_done()
 
-    async def process_ct_logs(self) -> Set[str]:
-        """
-        Fetch .ir domains from crt.sh. This must return real CT-derived domains.
-        Test-domain fallback is intentionally not allowed for production scans.
-        """
+    async def _download_ct_json(self, query: str) -> Optional[List[Dict]]:
         session = self._require_session()
-        ct_domains: Set[str] = set()
-        query = "%.ir"
         url = "https://crt.sh/"
         params = {"q": query, "output": "json"}
+        data = bytearray()
 
+        async with session.get(
+            url,
+            params=params,
+            timeout=aiohttp.ClientTimeout(total=self.ct_timeout),
+        ) as resp:
+            if resp.status != 200:
+                logger.warning(f"CT log query returned HTTP {resp.status} for {query}")
+                return None
+
+            content_length = resp.headers.get("Content-Length")
+            if content_length and int(content_length) > self.ct_max_response_bytes:
+                raise CtResponseTooLarge(
+                    f"CT response for {query} exceeds {self.ct_max_response_bytes} bytes"
+                )
+
+            async for chunk in resp.content.iter_chunked(1024 * 512):
+                data.extend(chunk)
+                if len(data) > self.ct_max_response_bytes:
+                    raise CtResponseTooLarge(
+                        f"CT response for {query} exceeds {self.ct_max_response_bytes} bytes"
+                    )
+
+        try:
+            parsed = json.loads(data.decode("utf-8", errors="replace"))
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse JSON from CT logs for {query}")
+            return None
+
+        if not isinstance(parsed, list):
+            logger.warning(f"Unexpected CT log response format for {query}")
+            return None
+        return parsed
+
+    @staticmethod
+    def _extract_ir_domains(cert_rows: Sequence[Dict]) -> Set[str]:
+        domains: Set[str] = set()
+        for cert in cert_rows:
+            raw_names = str(cert.get("name_value", ""))
+            for domain in raw_names.split("\n"):
+                domain = domain.strip().lower().rstrip(".")
+                if domain.startswith("*."):
+                    domain = domain[2:]
+                if domain.endswith(".ir") and len(domain) > 3:
+                    domains.add(domain)
+        return domains
+
+    async def _query_ct_shard(self, prefix: str) -> Optional[Set[str]]:
+        query = f"{prefix}%.ir"
         for attempt in range(1, self.ct_retries + 1):
             logger.info(
                 f"Querying CT logs for: {query} "
                 f"(attempt {attempt}/{self.ct_retries}, timeout {self.ct_timeout}s)"
             )
             try:
-                async with session.get(
-                    url,
-                    params=params,
-                    timeout=aiohttp.ClientTimeout(total=self.ct_timeout),
-                ) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"CT log query returned HTTP {resp.status} for {query}")
-                    else:
-                        text = await resp.text()
-                        try:
-                            data = json.loads(text)
-                        except json.JSONDecodeError:
-                            logger.warning("Failed to parse JSON from CT logs")
-                            data = []
-
-                        if isinstance(data, list):
-                            for cert in data:
-                                for domain in cert.get("name_value", "").split("\n"):
-                                    domain = domain.strip().lower().rstrip(".")
-                                    if domain.startswith("*."):
-                                        domain = domain[2:]
-                                    if domain.endswith(".ir") and len(domain) > 3:
-                                        ct_domains.add(domain)
-                        else:
-                            logger.warning("Unexpected CT log response format")
+                rows = await self._download_ct_json(query)
+                if rows is None:
+                    domains: Set[str] = set()
+                else:
+                    domains = self._extract_ir_domains(rows)
+                logger.info(f"CT shard {query} returned {len(domains)} unique .ir hostnames")
+                return domains
+            except CtResponseTooLarge as exc:
+                logger.warning(str(exc))
+                raise
             except asyncio.TimeoutError:
                 logger.warning(f"CT log query timeout for {query}")
             except Exception as exc:
-                logger.error(f"CT log query error: {exc}")
-
-            if ct_domains:
-                logger.info(f"Found {len(ct_domains)} unique .ir domains from CT logs")
-                return ct_domains
+                logger.error(f"CT log query error for {query}: {exc}")
 
             if attempt < self.ct_retries:
                 delay = min(10 * attempt, 30)
-                logger.info(f"No CT domains found yet; retrying in {delay}s")
+                logger.info(f"Retrying CT shard {query} in {delay}s")
                 await asyncio.sleep(delay)
 
-        logger.error("Found 0 unique .ir domains from CT logs")
+        return None
+
+    async def process_ct_logs(self) -> Set[str]:
+        """
+        Fetch CT-known .ir hostnames from crt.sh using sharded prefix queries.
+        Test-domain fallback is intentionally not allowed for production scans.
+        """
+        ct_domains: Set[str] = set()
+        pending: List[str] = list(self.ct_prefixes)
+        processed: Set[str] = set()
+
+        while pending:
+            prefix = pending.pop(0)
+            if prefix in processed:
+                continue
+            processed.add(prefix)
+
+            try:
+                shard_domains = await self._query_ct_shard(prefix)
+            except CtResponseTooLarge:
+                if len(prefix) < self.ct_max_depth:
+                    logger.info(f"Splitting oversized CT shard {prefix!r} into deeper shards")
+                    pending.extend(f"{prefix}{char}" for char in self.ct_shard_chars)
+                else:
+                    logger.warning(
+                        f"Skipping oversized CT shard {prefix!r}; increase --ct-max-depth "
+                        "or --ct-max-response-mb for broader coverage"
+                    )
+                shard_domains = None
+
+            if shard_domains:
+                before = len(ct_domains)
+                ct_domains.update(shard_domains)
+                logger.info(
+                    f"CT discovery total: {len(ct_domains)} unique .ir hostnames "
+                    f"(+{len(ct_domains) - before})"
+                )
+
+            if self.ct_query_delay:
+                await asyncio.sleep(self.ct_query_delay)
+
+        logger.info(f"Found {len(ct_domains)} unique CT-known .ir hostnames")
         return ct_domains
 
     async def run(self, domains: Optional[List[str]] = None):
@@ -285,7 +421,7 @@ class DomainChecker:
             domains = list(await self.process_ct_logs())
             if not domains:
                 raise RuntimeError(
-                    "CT log discovery returned zero .ir domains after retries. "
+                    "CT discovery returned zero .ir hostnames after all shards. "
                     "No fallback test scan was run. Try again later or check crt.sh/network availability."
                 )
 
@@ -300,8 +436,9 @@ class DomainChecker:
 
         for worker in workers:
             worker.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
 
-        await self.save_batch(force=True)
+        await self.flush_results()
 
         elapsed = time.time() - start_time
         logger.info(f"=== Completed in {elapsed:.1f}s ===")
@@ -339,7 +476,7 @@ async def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Check Iranian domain accessibility from outside Iran"
+        description="Check CT-known .ir hostname accessibility from this VPS/network"
     )
     parser.add_argument(
         "--output",
@@ -371,25 +508,48 @@ async def main():
     parser.add_argument(
         "--ct-timeout",
         type=int,
-        default=180,
-        help="Certificate Transparency query timeout in seconds (default: 180)",
+        default=60,
+        help="Per-shard Certificate Transparency query timeout in seconds (default: 60)",
     )
     parser.add_argument(
         "--ct-retries",
         type=int,
-        default=3,
-        help="Certificate Transparency query retry count (default: 3)",
+        default=2,
+        help="Per-shard Certificate Transparency query retry count (default: 2)",
+    )
+    parser.add_argument(
+        "--ct-prefixes",
+        default=DEFAULT_CT_PREFIXES,
+        help="Initial CT shard prefixes. Use a string like abc or comma-separated prefixes like a,b,1 (default: 0-9a-z)",
+    )
+    parser.add_argument(
+        "--ct-max-depth",
+        type=int,
+        default=2,
+        help="Maximum prefix depth for splitting oversized CT shards (default: 2)",
+    )
+    parser.add_argument(
+        "--ct-query-delay",
+        type=float,
+        default=1.0,
+        help="Delay between CT shard queries in seconds (default: 1.0)",
+    )
+    parser.add_argument(
+        "--ct-max-response-mb",
+        type=int,
+        default=50,
+        help="Maximum CT response size per shard in MiB before deeper sharding/skipping (default: 50)",
     )
     parser.add_argument(
         "--domains",
-        help="Comma-separated list of domains to check instead of CT logs. Use this only for manual tests.",
+        help="Comma-separated list of domains to check instead of CT discovery. Use this only for manual tests.",
     )
 
     args = parser.parse_args()
 
     custom_domains = None
     if args.domains:
-        custom_domains = [d.strip() for d in args.domains.split(",") if d.strip()]
+        custom_domains = [d.strip().lower() for d in args.domains.split(",") if d.strip()]
 
     async with DomainChecker(
         output_file=args.output,
@@ -398,6 +558,10 @@ async def main():
         batch_size=args.batch,
         ct_timeout=args.ct_timeout,
         ct_retries=args.ct_retries,
+        ct_prefixes=args.ct_prefixes,
+        ct_max_depth=args.ct_max_depth,
+        ct_query_delay=args.ct_query_delay,
+        ct_max_response_mb=args.ct_max_response_mb,
     ) as checker:
         await checker.run(domains=custom_domains)
 
