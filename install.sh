@@ -14,6 +14,7 @@ NC='\033[0m'
 
 REPO_URL="https://github.com/Arianrv/scan-ir-domains.git"
 REQUIRED_FILES=("iran_domain_checker.py" "analyze_results.py" "install.sh")
+TEST_DOMAINS="diver.ir,nic.ir,time.ir"
 TMP_DIR=""
 
 cleanup() {
@@ -285,6 +286,29 @@ echo -e "${GREEN}✓ Systemd service created${NC}"
 echo ""
 
 echo -e "${BLUE}[8/9]${NC} ${YELLOW}Creating helper scripts${NC}..."
+cat > "$CHECKER_DIR/run_now.sh" <<SCRIPTEOF
+#!/bin/bash
+set -euo pipefail
+cd "$CHECKER_DIR"
+exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
+  --output "$CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl" \\
+  --workers "$WORKERS" \\
+  --timeout "$TIMEOUT" \\
+  --batch 10
+SCRIPTEOF
+
+cat > "$CHECKER_DIR/test_domains.sh" <<SCRIPTEOF
+#!/bin/bash
+set -euo pipefail
+cd "$CHECKER_DIR"
+exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
+  --domains "$TEST_DOMAINS" \\
+  --output "$CHECKER_DIR/results/test_\$(date +%Y%m%d_%H%M%S).jsonl" \\
+  --workers 5 \\
+  --timeout 5 \\
+  --batch 10
+SCRIPTEOF
+
 cat > "$CHECKER_DIR/status.sh" <<'SCRIPTEOF'
 #!/bin/bash
 set -euo pipefail
@@ -295,12 +319,12 @@ echo ""
 
 LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1 || true)
 if [ -n "$LATEST" ]; then
-    echo "Latest scan: $(basename "$LATEST")"
+    echo "Latest full scan: $(basename "$LATEST")"
     echo "Size: $(du -h "$LATEST" | cut -f1)"
     echo "Lines (domains): $(wc -l < "$LATEST")"
     echo "Age: $(date -r "$LATEST" '+%Y-%m-%d %H:%M:%S')"
 else
-    echo "Status: No scans yet"
+    echo "Status: No full scans yet"
 fi
 
 echo ""
@@ -309,10 +333,18 @@ du -sh results/ logs/ data/ 2>/dev/null || echo "  N/A"
 echo ""
 echo "Next scheduled scan:"
 systemctl list-timers domain-checker.timer 2>/dev/null | grep domain-checker || echo "  Timer info unavailable"
+echo ""
+echo "Run a full scan now:"
+echo "  ./run_now.sh"
+echo ""
+echo "Run the fixed small test set:"
+echo "  ./test_domains.sh"
 SCRIPTEOF
-chmod +x "$CHECKER_DIR/status.sh"
-chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh"
+chmod +x "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh"
+chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/status.sh" "$CHECKER_DIR/run_now.sh" "$CHECKER_DIR/test_domains.sh"
 echo "  └─ Created: status.sh"
+echo "  └─ Created: run_now.sh"
+echo "  └─ Created: test_domains.sh"
 echo -e "${GREEN}✓ Helper scripts created${NC}"
 echo ""
 
@@ -345,11 +377,7 @@ if [ "$RUN_FIRST_SCAN" = "y" ]; then
     echo ""
 
     cd "$CHECKER_DIR"
-    if sudo -u "$CHECKER_USER" "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \
-        --output "$CHECKER_DIR/results/scan_$(date +%Y%m%d_%H%M%S).jsonl" \
-        --workers "$WORKERS" \
-        --timeout "$TIMEOUT" \
-        --batch 10; then
+    if sudo -u "$CHECKER_USER" "$CHECKER_DIR/run_now.sh"; then
         echo ""
         echo -e "${GREEN}✓ First full scan complete!${NC}"
     else
@@ -358,38 +386,38 @@ if [ "$RUN_FIRST_SCAN" = "y" ]; then
         echo "  Certificate Transparency discovery may be temporarily unavailable."
         echo "  No fallback test scan was saved as a real result."
         echo "  Retry manually:"
-        echo "   cd $CHECKER_DIR"
-        echo "   sudo -u $CHECKER_USER $CHECKER_DIR/venv/bin/python3 iran_domain_checker.py --output $CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl --workers $WORKERS --timeout $TIMEOUT --batch 10"
+        echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
     fi
     echo ""
 fi
 
 print_section "Next Steps - How to Use"
 echo ""
-echo -e "${GREEN}1. Check Status${NC}"
+echo -e "${GREEN}1. Start a Full Scan Now${NC}"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
+echo ""
+echo -e "${GREEN}2. Start via systemd Now${NC}"
+echo "   sudo systemctl start domain-checker.service"
+echo ""
+echo -e "${GREEN}3. Check Status${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
 echo ""
-echo -e "${GREEN}2. View Live Logs${NC}"
+echo -e "${GREEN}4. View Live Logs${NC}"
 echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
-echo -e "${GREEN}3. Manual Full Scan${NC}"
-echo "   cd $CHECKER_DIR"
-echo "   sudo -u $CHECKER_USER $CHECKER_DIR/venv/bin/python3 iran_domain_checker.py --output $CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl --workers $WORKERS --timeout $TIMEOUT --batch 10"
+echo -e "${GREEN}5. Manual Test Scan${NC}"
+echo "   sudo -u $CHECKER_USER $CHECKER_DIR/test_domains.sh"
+echo "   Domains: $TEST_DOMAINS"
 echo ""
-echo -e "${GREEN}4. Manual Test Scan${NC}"
-echo "   cd $CHECKER_DIR"
-echo "   source venv/bin/activate"
-echo "   python3 iran_domain_checker.py --domains 'test.ir,example.ir' --timeout 5"
-echo ""
-echo -e "${GREEN}5. View Results${NC}"
+echo -e "${GREEN}6. View Results${NC}"
 echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
-echo -e "${GREEN}6. Analyze Results${NC}"
+echo -e "${GREEN}7. Analyze Results${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
 echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
 echo ""
-echo -e "${GREEN}7. Download Results to Local Machine${NC}"
+echo -e "${GREEN}8. Download Results to Local Machine${NC}"
 echo "   scp -r root@YOUR_SERVER_IP:$CHECKER_DIR/results/ ./local_backups/"
 echo ""
 
