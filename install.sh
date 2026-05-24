@@ -132,9 +132,9 @@ echo ""
 print_section "First Scan"
 echo ""
 echo "Run first scan immediately after installation?"
-echo "  Every manual and scheduled scan now fetches Common Crawl .ir domains first."
-echo "  Then it merges them into data/domains.txt and scans that local source list."
-echo "  If Common Crawl is temporarily unavailable, existing domains.txt is still scanned."
+echo "  Every manual and scheduled scan fetches Common Crawl .ir domains first."
+echo "  Then it scans the local source list and saves accessible domains only."
+echo "  Outputs: accessible JSONL and a Domain/ip text file."
 echo ""
 read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
 RUN_FIRST_SCAN=${RUN_FIRST_SCAN_INPUT:-y}
@@ -255,8 +255,10 @@ cat > "$CHECKER_DIR/fetch_and_scan.sh" <<SCRIPTEOF
 set -euo pipefail
 cd "$CHECKER_DIR"
 
-FETCH_LOG="$CHECKER_DIR/logs/fetch_\$(date +%Y%m%d_%H%M%S).log"
-SCAN_OUTPUT="$CHECKER_DIR/results/scan_\$(date +%Y%m%d_%H%M%S).jsonl"
+RUN_ID="\$(date +%Y%m%d_%H%M%S)"
+FETCH_LOG="$CHECKER_DIR/logs/fetch_\${RUN_ID}.log"
+SCAN_OUTPUT="$CHECKER_DIR/results/accessible_\${RUN_ID}.jsonl"
+TEXT_OUTPUT="$CHECKER_DIR/results/accessible_\${RUN_ID}.txt"
 
 "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/collect_domains.py" \\
   --output "$CHECKER_DIR/data/domains.txt" \\
@@ -269,6 +271,7 @@ exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
   --source file \\
   --input-file "$CHECKER_DIR/data/domains.txt" \\
   --output "\$SCAN_OUTPUT" \\
+  --accessible-output "\$TEXT_OUTPUT" \\
   --workers "$WORKERS" \\
   --timeout "$TIMEOUT" \\
   --batch 10
@@ -278,7 +281,7 @@ chown "$CHECKER_USER:$CHECKER_USER" "$CHECKER_DIR/fetch_and_scan.sh"
 
 cat > "/etc/systemd/system/domain-checker.service" <<SVCEOF
 [Unit]
-Description=scan-ir-domains - Fetch .ir Domains and Scan
+Description=scan-ir-domains - Fetch .ir Domains and Save Accessible Results
 After=network-online.target
 Wants=network-online.target
 
@@ -298,7 +301,7 @@ SVCEOF
 
 cat > "/etc/systemd/system/domain-checker.timer" <<TMREOF
 [Unit]
-Description=Fetch .ir domains and run scan-ir-domains daily at $SCAN_TIME UTC
+Description=Fetch .ir domains and save accessible results daily at $SCAN_TIME UTC
 Requires=domain-checker.service
 
 [Timer]
@@ -348,7 +351,7 @@ cd "$CHECKER_DIR"
 exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
   --source ct \\
   --cache-file "$CHECKER_DIR/data/domain_cache.txt" \\
-  --output "$CHECKER_DIR/results/ct_scan_\$(date +%Y%m%d_%H%M%S).jsonl" \\
+  --output "$CHECKER_DIR/results/ct_accessible_\$(date +%Y%m%d_%H%M%S).jsonl" \\
   --workers "$WORKERS" \\
   --timeout "$TIMEOUT" \\
   --batch 10
@@ -357,10 +360,12 @@ SCRIPTEOF
 cat > "$CHECKER_DIR/test_domains.sh" <<SCRIPTEOF
 #!/bin/bash
 set -euo pipefail
+RUN_ID="\$(date +%Y%m%d_%H%M%S)"
 cd "$CHECKER_DIR"
 exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
   --domains "$TEST_DOMAINS" \\
-  --output "$CHECKER_DIR/results/test_\$(date +%Y%m%d_%H%M%S).jsonl" \\
+  --output "$CHECKER_DIR/results/test_accessible_\${RUN_ID}.jsonl" \\
+  --accessible-output "$CHECKER_DIR/results/test_accessible_\${RUN_ID}.txt" \\
   --workers 5 \\
   --timeout 5 \\
   --batch 10
@@ -374,14 +379,21 @@ echo "=== scan-ir-domains Status ==="
 echo "Time: $(date)"
 echo ""
 
-LATEST=$(ls -t results/scan_*.jsonl 2>/dev/null | head -1 || true)
-if [ -n "$LATEST" ]; then
-    echo "Latest scan: $(basename "$LATEST")"
-    echo "Size: $(du -h "$LATEST" | cut -f1)"
-    echo "Lines (domains): $(wc -l < "$LATEST")"
-    echo "Age: $(date -r "$LATEST" '+%Y-%m-%d %H:%M:%S')"
+LATEST_JSON=$(ls -t results/accessible_*.jsonl 2>/dev/null | head -1 || true)
+LATEST_TXT=$(ls -t results/accessible_*.txt 2>/dev/null | head -1 || true)
+if [ -n "$LATEST_JSON" ]; then
+    echo "Latest accessible JSONL: $LATEST_JSON"
+    echo "JSONL size: $(du -h "$LATEST_JSON" | cut -f1)"
+    echo "Accessible JSONL rows: $(wc -l < "$LATEST_JSON")"
 else
-    echo "Status: No scans yet"
+    echo "Latest accessible JSONL: none"
+fi
+if [ -n "$LATEST_TXT" ]; then
+    echo "Latest Domain/ip text: $LATEST_TXT"
+    echo "Text size: $(du -h "$LATEST_TXT" | cut -f1)"
+    echo "Text rows including header: $(wc -l < "$LATEST_TXT")"
+else
+    echo "Latest Domain/ip text: none"
 fi
 
 echo ""
@@ -439,15 +451,15 @@ echo -e "${BLUE}╚════════════════════�
 echo ""
 
 if [ "$RUN_FIRST_SCAN" = "y" ]; then
-    print_section "Running First Fetch + Scan..."
+    print_section "Running First Fetch + Accessible Scan..."
     echo ""
-    echo "Fetching .ir domains from Common Crawl into data/domains.txt, then scanning."
+    echo "Fetching .ir domains from Common Crawl, then saving accessible domains only."
     echo ""
 
     cd "$CHECKER_DIR"
     if sudo -u "$CHECKER_USER" "$CHECKER_DIR/run_now.sh"; then
         echo ""
-        echo -e "${GREEN}✓ First fetch + scan complete!${NC}"
+        echo -e "${GREEN}✓ First fetch + accessible scan complete!${NC}"
     else
         echo ""
         echo -e "${YELLOW}⚠ First fetch + scan did not complete.${NC}"
@@ -460,7 +472,7 @@ fi
 
 print_section "Next Steps - How to Use"
 echo ""
-echo -e "${GREEN}1. Start Fetch + Scan Now${NC}"
+echo -e "${GREEN}1. Start Fetch + Accessible Scan Now${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/run_now.sh"
 echo ""
 echo -e "${GREEN}2. Fetch Domains Only${NC}"
@@ -472,25 +484,28 @@ echo ""
 echo -e "${GREEN}4. Check Status${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/status.sh"
 echo ""
-echo -e "${GREEN}5. View Live Logs${NC}"
+echo -e "${GREEN}5. View Latest Accessible Domain/ip Text${NC}"
+echo "   cat \$(ls -t $CHECKER_DIR/results/accessible_*.txt | head -1)"
+echo ""
+echo -e "${GREEN}6. View Live Logs${NC}"
 echo "   sudo journalctl -u domain-checker.service -f"
 echo ""
-echo -e "${GREEN}6. Manual Test Scan${NC}"
+echo -e "${GREEN}7. Manual Test Scan${NC}"
 echo "   sudo -u $CHECKER_USER $CHECKER_DIR/test_domains.sh"
 echo "   Domains: $TEST_DOMAINS"
 echo ""
-echo -e "${GREEN}7. View Results${NC}"
+echo -e "${GREEN}8. View Results${NC}"
 echo "   ls -lh $CHECKER_DIR/results/"
 echo ""
-echo -e "${GREEN}8. Analyze Results${NC}"
+echo -e "${GREEN}9. Analyze Accessible JSONL Results${NC}"
 echo "   cd $CHECKER_DIR"
 echo "   source venv/bin/activate"
-echo "   python3 analyze_results.py results/scan_*.jsonl --format summary"
+echo "   python3 analyze_results.py results/accessible_*.jsonl --format summary"
 echo ""
 
 print_section "Timer Configuration"
 echo ""
-echo -e "${YELLOW}✓ Daily fetch + scan is scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
+echo -e "${YELLOW}✓ Daily fetch + accessible scan is scheduled to run at${NC} ${GREEN}${SCAN_TIME} UTC${NC}"
 echo "  Check next run: sudo systemctl list-timers domain-checker.timer"
 echo ""
 
@@ -501,5 +516,5 @@ echo "   bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-dom
 echo ""
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}✓ All done! Automated fetching and scanning is now configured.${NC}"
+echo -e "${GREEN}✓ All done! Automated fetching and accessible-only scanning is now configured.${NC}"
 echo ""
