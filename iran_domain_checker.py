@@ -59,6 +59,7 @@ class DomainChecker:
         self.ct_retries = ct_retries
         self.checked_domains: Set[str] = set()
         self.results_buffer: List[Dict] = []
+        self.write_lock = asyncio.Lock()
         self.session: Optional[aiohttp.ClientSession] = None
         self.queue: asyncio.Queue = asyncio.Queue()
 
@@ -179,19 +180,20 @@ class DomainChecker:
         return result
 
     async def save_batch(self, force: bool = False):
-        if len(self.results_buffer) >= self.batch_size or (force and self.results_buffer):
-            try:
-                output_path = Path(self.output_file)
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                async with aiofiles.open(output_path, "a") as f:
-                    for result in self.results_buffer:
-                        await f.write(json.dumps(result) + "\n")
+        async with self.write_lock:
+            if len(self.results_buffer) >= self.batch_size or (force and self.results_buffer):
+                try:
+                    output_path = Path(self.output_file)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    async with aiofiles.open(output_path, "a") as f:
+                        for result in self.results_buffer:
+                            await f.write(json.dumps(result) + "\n")
 
-                count = len(self.results_buffer)
-                logger.info(f"💾 Saved {count} results to {self.output_file}")
-                self.results_buffer = []
-            except Exception as exc:
-                logger.error(f"Failed to save batch: {exc}")
+                    count = len(self.results_buffer)
+                    logger.info(f"💾 Saved {count} results to {self.output_file}")
+                    self.results_buffer = []
+                except Exception as exc:
+                    logger.error(f"Failed to save batch: {exc}")
 
     async def worker(self, worker_id: int):
         while True:
@@ -221,7 +223,8 @@ class DomainChecker:
         session = self._require_session()
         ct_domains: Set[str] = set()
         query = "%.ir"
-        url = f"https://crt.sh/?q={query}&output=json"
+        url = "https://crt.sh/"
+        params = {"q": query, "output": "json"}
 
         for attempt in range(1, self.ct_retries + 1):
             logger.info(
@@ -231,6 +234,7 @@ class DomainChecker:
             try:
                 async with session.get(
                     url,
+                    params=params,
                     timeout=aiohttp.ClientTimeout(total=self.ct_timeout),
                 ) as resp:
                     if resp.status != 200:
