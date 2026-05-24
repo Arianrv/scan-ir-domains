@@ -133,7 +133,7 @@ print_section "First Scan"
 echo ""
 echo "Run first scan immediately after installation?"
 echo "  Every manual and scheduled scan fetches Common Crawl .ir domains first."
-echo "  Then it scans the local source list and saves accessible domains only."
+echo "  If fetching leaves only the 3 starter domains, scanning is stopped instead of producing a fake small scan."
 echo "  Outputs: accessible JSONL and a Domain/ip text file."
 echo ""
 read -p "Run first scan? (y/n, default: y): " RUN_FIRST_SCAN_INPUT
@@ -260,13 +260,26 @@ FETCH_LOG="$CHECKER_DIR/logs/fetch_\${RUN_ID}.log"
 SCAN_OUTPUT="$CHECKER_DIR/results/accessible_\${RUN_ID}.jsonl"
 TEXT_OUTPUT="$CHECKER_DIR/results/accessible_\${RUN_ID}.txt"
 
+mkdir -p "$CHECKER_DIR/logs" "$CHECKER_DIR/results" "$CHECKER_DIR/data"
+
+echo "== Fetching .ir domains from Common Crawl =="
+echo "Fetch log: \$FETCH_LOG"
 "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/collect_domains.py" \\
   --output "$CHECKER_DIR/data/domains.txt" \\
   --indexes 3 \\
   --limit-per-index 200000 \\
   --timeout 180 \\
-  > "\$FETCH_LOG" 2>&1 || true
+  2>&1 | tee "\$FETCH_LOG"
 
+DOMAIN_COUNT="\$(grep -Eic '^[a-z0-9.-]+\.ir$' "$CHECKER_DIR/data/domains.txt" 2>/dev/null || echo 0)"
+echo "Domain count after fetch: \$DOMAIN_COUNT"
+if [ "\$DOMAIN_COUNT" -le 3 ]; then
+  echo "ERROR: domain fetch did not populate beyond the 3 seed domains. Refusing to scan only seeds." >&2
+  echo "Check fetch log: \$FETCH_LOG" >&2
+  exit 1
+fi
+
+echo "== Scanning accessible domains only =="
 exec "$CHECKER_DIR/venv/bin/python3" "$CHECKER_DIR/iran_domain_checker.py" \\
   --source file \\
   --input-file "$CHECKER_DIR/data/domains.txt" \\
