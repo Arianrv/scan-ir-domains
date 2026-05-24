@@ -16,7 +16,7 @@ On any Ubuntu/Debian VPS, run:
 bash <(curl -fsSL https://raw.githubusercontent.com/Arianrv/scan-ir-domains/main/install.sh)
 ```
 
-The installer creates a dedicated user by default, installs Python dependencies, verifies required project files, creates systemd units, and optionally runs the first scan immediately.
+The installer creates a dedicated user by default, installs Python dependencies, verifies required project files, creates systemd units, creates helper scripts, and optionally runs the first full scan immediately.
 
 ---
 
@@ -47,7 +47,9 @@ The one-command installer:
 - ✅ Dependencies: `aiohttp`, `aiofiles`, `certifi`, `requests`
 - ✅ Project files verified after clone
 - ✅ Systemd service + daily timer
-- ✅ Optional first scan
+- ✅ `run_now.sh` helper for starting a full scan immediately
+- ✅ `test_domains.sh` helper for the fixed small test set: `diver.ir,nic.ir,time.ir`
+- ✅ Optional first full scan
 - ✅ Firewall configuration through UFW when available
 - ✅ Analysis script and status helper
 
@@ -62,9 +64,8 @@ The one-command installer:
 | `README.md` | This file |
 | `install.sh` | Automatic installer |
 | `uninstall.sh` | Safe uninstaller |
-| `QUICKSTART.md` | Local testing guide |
-| `USAGE_GUIDE.md` | Complete reference |
-| `INDEX.md` | File navigation |
+| `iran_domain_checker.py` | Scanner CLI |
+| `analyze_results.py` | Result analyzer CLI |
 
 ---
 
@@ -72,8 +73,8 @@ The one-command installer:
 
 ```json
 {
-  "domain": "example.ir",
-  "timestamp": "2026-05-23T14:30:45.123456",
+  "domain": "nic.ir",
+  "timestamp": "2026-05-23T14:30:45.123456+00:00",
   "accessible": true,
   "dns_resolves": true,
   "http_status": 200,
@@ -94,19 +95,30 @@ The one-command installer:
 
 ## 🎯 Basic Commands
 
+Assuming the default user and directory:
+
 ```bash
+# Start a full CT-based scan immediately
+sudo -u domainchecker /home/domainchecker/checker/run_now.sh
+
+# Start a full scan through systemd
+sudo systemctl start domain-checker.service
+
 # Check timer status
 sudo systemctl list-timers domain-checker.timer
+
+# Check scanner status
+sudo -u domainchecker /home/domainchecker/checker/status.sh
 
 # View logs
 sudo journalctl -u domain-checker.service -f
 
-# Run manual scan
+# Run the fixed small test set
+sudo -u domainchecker /home/domainchecker/checker/test_domains.sh
+
+# Analyze full-scan results
 cd /home/domainchecker/checker
 source venv/bin/activate
-python3 iran_domain_checker.py --domains "test.ir,example.ir"
-
-# Analyze results
 python3 analyze_results.py results/scan_*.jsonl --format summary
 
 # Download to local machine
@@ -159,10 +171,16 @@ Adjust based on VPS specs:
 
 ### Required file missing after install
 
-The installer now verifies required files after cloning. If this fails, the install stops instead of creating a broken systemd service.
+The installer verifies required files after cloning. If this fails, the install stops instead of creating a broken systemd service.
 
 ```bash
 ls -la /home/domainchecker/checker
+```
+
+### Start a scan right now
+
+```bash
+sudo -u domainchecker /home/domainchecker/checker/run_now.sh
 ```
 
 ### Timer not running
@@ -170,6 +188,14 @@ ls -la /home/domainchecker/checker
 ```bash
 sudo systemctl status domain-checker.timer
 sudo journalctl -u domain-checker.service -n 20
+```
+
+### Certificate Transparency source temporarily unavailable
+
+If `crt.sh` returns an error or zero domains, no fallback test result is saved as a real full scan. Retry later:
+
+```bash
+sudo -u domainchecker /home/domainchecker/checker/run_now.sh
 ```
 
 ### Out of memory
@@ -191,9 +217,13 @@ rm scan_*.jsonl
 ### Manual test
 
 ```bash
-cd /home/domainchecker/checker
-source venv/bin/activate
-python3 iran_domain_checker.py --domains "test.ir" --timeout 5
+sudo -u domainchecker /home/domainchecker/checker/test_domains.sh
+```
+
+This scans only:
+
+```text
+diver.ir,nic.ir,time.ir
 ```
 
 ---
